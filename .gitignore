@@ -1,0 +1,12 @@
+# Never commit the real config (contains API password)
+shell-access-manager.conf
+
+# Editor files
+*.swp
+*.swo
+*~
+.*.bak
+
+# OS files
+.DS_Store
+Thumbs.db

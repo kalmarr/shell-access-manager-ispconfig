@@ -1,0 +1,33 @@
+# ============================================================
+# Shell Access Manager for ISPConfig - Configuration
+# Copy this file to shell-access-manager.conf and edit.
+# ============================================================
+
+# --- ISPConfig Remote API ---
+API_URL="https://localhost:8080/remote/json.php"
+API_USER="shell_manager"
+API_PASS="CHANGE_ME"
+
+# --- Time Limits (in seconds) ---
+IDLE_LIMIT=10800          # 3 hours - disable after this much inactivity
+HARD_LIMIT=28800          # 8 hours - maximum lifetime (0 = no limit)
+
+# --- Monitoring ---
+CHECK_INTERVAL_MINUTES=10
+
+# --- Logging ---
+LOG_FILE="/var/log/shell-access-manager.log"
+SYSLOG_ENABLED=true
+SYSLOG_TAG="shell-access-mgr"
+
+# --- Notifications ---
+NOTIFY_EMAIL=""
+NOTIFY_ON_ENABLE=true
+NOTIFY_ON_DISABLE=true
+NOTIFY_ON_ERROR=true
+
+# --- State Files ---
+STATE_DIR="/var/lib/shell-access-manager"
+
+# --- ISPConfig Database ---
+ISPCONFIG_DB="dbispconfig"
