@@ -21,7 +21,7 @@ SYSLOG_ENABLED=true
 SYSLOG_TAG="shell-access-mgr"
 
 # --- Notifications ---
-NOTIFY_EMAIL=""
+NOTIFY_EMAIL="your@email.com"
 NOTIFY_ON_ENABLE=true
 NOTIFY_ON_DISABLE=true
 NOTIFY_ON_ERROR=true
