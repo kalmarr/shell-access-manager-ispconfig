@@ -1,13 +1,13 @@
 #!/bin/bash
 # ============================================================
-# Shell Access Manager for ISPConfig - Idle Monitor (Cron Job)
+# Shell Access Manager - Inaktivitás Monitor (Cron Job)
 #
 # Crontab: */10 * * * * /usr/local/shell-access-manager/monitor-idle-users.sh
 #
-# Tasks:
-#   1. Check all active shell users
-#   2. Idle limit exceeded -> disable
-#   3. Hard limit exceeded -> disable (backup for at-job)
+# Feladatai:
+#   1. Aktív shell userek ellenőrzése
+#   2. Inaktivitási limit túllépés -> letiltás
+#   3. Hard limit túllépés -> letiltás (backup az at job mellett)
 # ============================================================
 
 set -uo pipefail
@@ -15,7 +15,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 source "${SCRIPT_DIR}/lib-functions.sh"
 
-# Lock file - prevent concurrent execution
+# Lock fájl - párhuzamos futás elkerülése
 LOCK_FILE="/tmp/shell-access-monitor.lock"
 exec 200>"$LOCK_FILE"
 flock -n 200 || { log WARN "Monitor already running, skipping"; exit 0; }
@@ -26,6 +26,7 @@ USERS_DISABLED=0
 
 log INFO "=== Idle monitor scan started ==="
 
+# Aktív shell userek lekérése
 ACTIVE_USERS=$(get_active_shell_users)
 
 if [ -z "$ACTIVE_USERS" ]; then
@@ -36,13 +37,19 @@ fi
 while IFS=$'\t' read -r SHELL_USER_ID USERNAME SYS_USERID CLIENT_ID; do
     USERS_CHECKED=$((USERS_CHECKED + 1))
 
+    # --- Inaktivitás ellenőrzés ---
     LAST_ACTIVITY=$(get_last_ssh_activity "$USERNAME")
 
     if [ "$LAST_ACTIVITY" = "ACTIVE" ]; then
         log INFO "  $USERNAME: active SSH session - skip"
 
-        # Check hard limit even for active sessions
+        # Hard limit ellenőrzés aktív session-nél is
         ENABLED_FILE="${STATE_DIR}/${USERNAME}.enabled"
+        if [ ! -f "$ENABLED_FILE" ]; then
+            log WARN "  $USERNAME: active session but no state file - auto-registering"
+            echo "$NOW_EPOCH" > "${STATE_DIR}/${USERNAME}.enabled"
+            echo "$HARD_LIMIT" > "${STATE_DIR}/${USERNAME}.hard_limit"
+        fi
         if [ -f "$ENABLED_FILE" ]; then
             ENABLED_EPOCH=$(cat "$ENABLED_FILE")
             HARD_LIMIT_FILE="${STATE_DIR}/${USERNAME}.hard_limit"
@@ -61,22 +68,26 @@ while IFS=$'\t' read -r SHELL_USER_ID USERNAME SYS_USERID CLIENT_ID; do
         continue
     fi
 
-    # No activity data? Use enable timestamp
+    # Last activity = 0 -> soha nem lépett be, de a state fájlból nézzük
     if [ "$LAST_ACTIVITY" = "0" ]; then
         ENABLED_FILE="${STATE_DIR}/${USERNAME}.enabled"
         if [ -f "$ENABLED_FILE" ]; then
             LAST_ACTIVITY=$(cat "$ENABLED_FILE")
             log INFO "  $USERNAME: never logged in, using enable time as reference"
         else
-            log INFO "  $USERNAME: no activity data, no state file - skip"
-            continue
+            # AUTO-REGISTER: webes felületen bekapcsolt user
+            log WARN "  $USERNAME: active in DB but no state file - auto-registering now"
+            echo "$NOW_EPOCH" > "${STATE_DIR}/${USERNAME}.enabled"
+            echo "$HARD_LIMIT" > "${STATE_DIR}/${USERNAME}.hard_limit"
+            LAST_ACTIVITY=$NOW_EPOCH
+            log INFO "  $USERNAME: state file created, tracking starts (idle: ${IDLE_LIMIT}s, hard: ${HARD_LIMIT}s)"
         fi
     fi
 
     IDLE_SECONDS=$((NOW_EPOCH - LAST_ACTIVITY))
     IDLE_HUMAN=$(seconds_to_human "$IDLE_SECONDS")
 
-    # --- Idle limit check ---
+    # --- Inaktivitási limit ---
     if [ "$IDLE_SECONDS" -ge "$IDLE_LIMIT" ]; then
         log WARN "  $USERNAME: IDLE LIMIT exceeded (${IDLE_HUMAN} >= $(seconds_to_human $IDLE_LIMIT))"
         "${SCRIPT_DIR}/disable-shell-user.sh" "$USERNAME" "idle-timeout"
@@ -84,7 +95,7 @@ while IFS=$'\t' read -r SHELL_USER_ID USERNAME SYS_USERID CLIENT_ID; do
         continue
     fi
 
-    # --- Hard limit check ---
+    # --- Hard limit ---
     ENABLED_FILE="${STATE_DIR}/${USERNAME}.enabled"
     if [ -f "$ENABLED_FILE" ]; then
         ENABLED_EPOCH=$(cat "$ENABLED_FILE")
@@ -103,7 +114,7 @@ while IFS=$'\t' read -r SHELL_USER_ID USERNAME SYS_USERID CLIENT_ID; do
         fi
     fi
 
-    # --- User OK ---
+    # --- Felhasználó OK ---
     REMAINING_IDLE=$((IDLE_LIMIT - IDLE_SECONDS))
     log INFO "  $USERNAME: OK (idle: ${IDLE_HUMAN}, remaining: $(seconds_to_human $REMAINING_IDLE))"
 
@@ -111,8 +122,9 @@ done <<< "$ACTIVE_USERS"
 
 log INFO "=== Scan complete: checked=$USERS_CHECKED, disabled=$USERS_DISABLED ==="
 
+# Ha volt letiltás, összefoglaló email
 if [ "$USERS_DISABLED" -gt 0 ]; then
     notify "Monitor: $USERS_DISABLED user(s) disabled" \
-        "Idle monitor disabled $USERS_DISABLED shell user(s).\nTime: $(date '+%Y-%m-%d %H:%M:%S')\nDetails: $LOG_FILE" \
+        "Az idle monitor $USERS_DISABLED shell usert tiltott le.\nIdő: $(date '+%Y-%m-%d %H:%M:%S')\nRészletek: $LOG_FILE" \
         "disable"
 fi
