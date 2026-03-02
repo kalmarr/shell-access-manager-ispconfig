@@ -24,8 +24,8 @@ log() {
     case "$level" in
         ERROR) echo -e "\e[31m[$level]\e[0m $message" >&2 ;;
         WARN)  echo -e "\e[33m[$level]\e[0m $message" >&2 ;;
-        OK)    echo -e "\e[32m[$level]\e[0m $message" ;;
-        *)     echo "[$level] $message" ;;
+        OK)    echo -e "\e[32m[$level]\e[0m $message" >&2 ;;
+        *)     echo "[$level] $message" >&2 ;;
     esac
 }
 
@@ -102,9 +102,46 @@ get_active_shell_users() {
 get_last_ssh_activity() {
     local username="$1" last_epoch=0
 
-    # 1. Active session? -> currently active
+    # 1. Active session? -> check REAL activity via PTY idle time
     local active_sessions=$(who | grep "^${username} " | wc -l)
-    [ "$active_sessions" -gt 0 ] && { echo "ACTIVE"; return; }
+    if [ "$active_sessions" -gt 0 ]; then
+        local most_recent_pty=0
+
+        # Check each PTY device's modification time (= last I/O activity)
+        while IFS= read -r line; do
+            local pty_dev=$(echo "$line" | awk '{print $2}')
+            local dev_path="/dev/${pty_dev}"
+            if [ -c "$dev_path" ]; then
+                local pty_mtime=$(stat -c %Y "$dev_path" 2>/dev/null)
+                if [ -n "$pty_mtime" ] && [ "$pty_mtime" -gt "$most_recent_pty" ]; then
+                    most_recent_pty=$pty_mtime
+                fi
+            fi
+        done < <(who | grep "^${username} ")
+
+        local now_epoch=$(date +%s)
+
+        if [ "$most_recent_pty" -gt 0 ]; then
+            local pty_idle=$((now_epoch - most_recent_pty))
+
+            # If any PTY had activity within the idle limit -> truly ACTIVE
+            # Each keystroke/output resets the PTY mtime -> rolling 3h window
+            if [ "$pty_idle" -lt "$IDLE_LIMIT" ]; then
+                echo "ACTIVE"
+                return
+            else
+                # Session exists but PTY has been idle -> return last activity time
+                # This lets the monitor apply idle timeout
+                log INFO "  $username: session open but PTY idle for $(seconds_to_human $pty_idle)"
+                echo "$most_recent_pty"
+                return
+            fi
+        fi
+
+        # Could not read PTY (e.g. permissions) -> treat as active to be safe
+        echo "ACTIVE"
+        return
+    fi
 
     # 2. Check auth.log for last session close
     local auth_log="/var/log/auth.log"
@@ -127,10 +164,22 @@ get_last_ssh_activity() {
         fi
     fi
 
-    # 4. State file (enable timestamp as last resort)
+    # 4. State file as fallback if nothing else found
     if [ "$last_epoch" -eq 0 ]; then
         local state_file="${STATE_DIR}/${username}.enabled"
         [ -f "$state_file" ] && last_epoch=$(cat "$state_file")
+    fi
+
+    # 5. FLOOR: enable timestamp is always the minimum
+    #    You can't be "idle" from before you were enabled!
+    #    This prevents old auth.log entries from causing instant disable after re-enable.
+    local enabled_file="${STATE_DIR}/${username}.enabled"
+    if [ -f "$enabled_file" ]; then
+        local enabled_epoch=$(cat "$enabled_file")
+        if [ "$last_epoch" -lt "$enabled_epoch" ]; then
+            log INFO "  $username: activity ($last_epoch) predates enable ($enabled_epoch) - using enable time as floor"
+            last_epoch=$enabled_epoch
+        fi
     fi
 
     echo "$last_epoch"
