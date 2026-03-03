@@ -97,48 +97,55 @@ get_active_shell_users() {
 
 # ============================================================
 # SSH Activity Detection
+# Compatible with jailkit chroot (who/utmp does NOT work there)
+# Uses pgrep + PTY mtime + process elapsed time
 # ============================================================
 
 get_last_ssh_activity() {
     local username="$1" last_epoch=0
 
-    # 1. Active session? -> check REAL activity via PTY idle time
-    local active_sessions=$(who | grep "^${username} " | wc -l)
-    if [ "$active_sessions" -gt 0 ]; then
-        local most_recent_pty=0
+    # 1. Active processes? (works with jailkit chroot - who/utmp does NOT)
+    local active_procs=$(pgrep -u "$username" 2>/dev/null | wc -l)
+    if [ "$active_procs" -gt 0 ]; then
+        # Check REAL activity via PTY device mtime OR process start time
+        local most_recent_activity=0
 
-        # Check each PTY device's modification time (= last I/O activity)
-        while IFS= read -r line; do
-            local pty_dev=$(echo "$line" | awk '{print $2}')
-            local dev_path="/dev/${pty_dev}"
-            if [ -c "$dev_path" ]; then
-                local pty_mtime=$(stat -c %Y "$dev_path" 2>/dev/null)
-                if [ -n "$pty_mtime" ] && [ "$pty_mtime" -gt "$most_recent_pty" ]; then
-                    most_recent_pty=$pty_mtime
-                fi
+        # Method A: PTY device check (for interactive sessions)
+        local user_ptys=$(find /dev/pts/ -user "$username" 2>/dev/null)
+        for dev_path in $user_ptys; do
+            local pty_mtime=$(stat -c %Y "$dev_path" 2>/dev/null)
+            if [ -n "$pty_mtime" ] && [ "$pty_mtime" -gt "$most_recent_activity" ]; then
+                most_recent_activity=$pty_mtime
             fi
-        done < <(who | grep "^${username} ")
+        done
+
+        # Method B: Most recent process start time (for background processes / jailkit)
+        if [ "$most_recent_activity" -eq 0 ]; then
+            local newest_proc_start
+            newest_proc_start=$(ps -u "$username" -o etimes= 2>/dev/null | sort -n | head -1)
+            if [ -n "$newest_proc_start" ]; then
+                local now_epoch=$(date +%s)
+                most_recent_activity=$((now_epoch - newest_proc_start))
+            fi
+        fi
 
         local now_epoch=$(date +%s)
 
-        if [ "$most_recent_pty" -gt 0 ]; then
-            local pty_idle=$((now_epoch - most_recent_pty))
+        if [ "$most_recent_activity" -gt 0 ]; then
+            local idle_seconds=$((now_epoch - most_recent_activity))
 
-            # If any PTY had activity within the idle limit -> truly ACTIVE
-            # Each keystroke/output resets the PTY mtime -> rolling 3h window
-            if [ "$pty_idle" -lt "$IDLE_LIMIT" ]; then
+            if [ "$idle_seconds" -lt "$IDLE_LIMIT" ]; then
                 echo "ACTIVE"
                 return
             else
-                # Session exists but PTY has been idle -> return last activity time
-                # This lets the monitor apply idle timeout
-                log INFO "  $username: session open but PTY idle for $(seconds_to_human $pty_idle)"
-                echo "$most_recent_pty"
+                log INFO "  $username: processes running but idle for $(seconds_to_human $idle_seconds)"
+                echo "$most_recent_activity"
                 return
             fi
         fi
 
-        # Could not read PTY (e.g. permissions) -> treat as active to be safe
+        # Has processes but can't determine activity time -> treat as active
+        log INFO "  $username: $active_procs process(es) running - treating as ACTIVE"
         echo "ACTIVE"
         return
     fi
