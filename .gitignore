@@ -1,0 +1,4 @@
+shell-access-manager.conf
+*.bak
+*.log
+state/
