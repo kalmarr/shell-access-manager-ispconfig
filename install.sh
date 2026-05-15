@@ -154,6 +154,43 @@ if [ -f "$ISPCONFIG_INSTALLER" ] && [ -d "/usr/local/ispconfig/interface/web" ];
 
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         bash "$ISPCONFIG_INSTALLER" install
+
+        # ============================================================
+        # Update-safe watchdog: keeps shell_timer/ alive after ISPConfig updates
+        # ============================================================
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "  Frissítés-biztos watchdog telepítése..."
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+        TEMPLATES_DIR=/usr/local/shell-access-manager/ispconfig-templates
+        WATCHDOG_SRC="${SCRIPT_DIR}/ispconfig-integration/watchdog"
+
+        # 1. Stable template copy (lives outside the ISPConfig tree)
+        mkdir -p "$TEMPLATES_DIR"
+        cp "${SCRIPT_DIR}/ispconfig-integration/shell_timer/api.php"       "$TEMPLATES_DIR/"
+        cp "${SCRIPT_DIR}/ispconfig-integration/shell_timer/timer.js"      "$TEMPLATES_DIR/"
+        cp "${SCRIPT_DIR}/ispconfig-integration/shell_timer/dashboard.php" "$TEMPLATES_DIR/"
+        chmod 644 "$TEMPLATES_DIR"/*
+        echo "  ✅ Sablonok: $TEMPLATES_DIR"
+
+        # 2. Redeploy script + systemd units
+        install -m 0755 "${WATCHDOG_SRC}/ispconfig-redeploy.sh" \
+                        /usr/local/shell-access-manager/ispconfig-redeploy.sh
+        install -m 0644 "${WATCHDOG_SRC}/shell-timer-watchdog.path"    /etc/systemd/system/
+        install -m 0644 "${WATCHDOG_SRC}/shell-timer-watchdog.service" /etc/systemd/system/
+        install -m 0644 "${WATCHDOG_SRC}/shell-timer-watchdog.timer"   /etc/systemd/system/
+        systemctl daemon-reload
+        systemctl enable --now shell-timer-watchdog.path  >/dev/null 2>&1
+        systemctl enable --now shell-timer-watchdog.timer >/dev/null 2>&1
+
+        echo "  ✅ Redeploy script: /usr/local/shell-access-manager/ispconfig-redeploy.sh"
+        echo "  ✅ systemd path-unit: shell-timer-watchdog.path (aktív)"
+        echo "  ✅ systemd timer:     shell-timer-watchdog.timer (óránként)"
+        echo ""
+        echo "  ⭐ ISPConfig frissítés után a Shell Timer fájlok 30s-en belül"
+        echo "     automatikusan visszakerülnek — semmi teendő."
+        echo ""
     else
         echo ""
         echo "  Skipped. You can install it later with:"

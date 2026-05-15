@@ -106,13 +106,16 @@ APACHECONF
             cp "$VHOST_CONF" "${VHOST_CONF}.bak.$(date +%Y%m%d%H%M%S)"
             
             # Insert mod_substitute directive before </VirtualHost>
+            # SetEnv no-gzip 1 + INFLATE;SUBSTITUTE;DEFLATE chain: ezek nélkül
+            # az ISPConfig panel gzip-pelt HTML-jén a Substitute nem hat.
             sed -i '/<\/VirtualHost>/i \
 \
     # --- Shell Timer Integration (do not remove) ---\
     # shell-timer-integration\
+    SetEnv no-gzip 1\
     <IfModule mod_substitute.c>\
-        AddOutputFilterByType SUBSTITUTE text/html\
-        Substitute "s|</head>|<script src=\\x27/shell_timer/timer.js?v=1\\x27 defer></script></head>|ni"\
+        AddOutputFilterByType INFLATE;SUBSTITUTE;DEFLATE text/html\
+        Substitute "s|</head>|<script src=\\x27/shell_timer/timer.js?v=2\\x27 defer></script></head>|ni"\
     </IfModule>' "$VHOST_CONF"
             
             log_ok "ISPConfig vhost frissítve: $VHOST_CONF"
@@ -200,6 +203,21 @@ do_uninstall() {
     echo "Shell Timer eltávolítása..."
     echo ""
 
+    # --- Disable & remove watchdog (must be BEFORE removing files,
+    #     otherwise the watchdog races us and re-installs them) ---
+    for unit in shell-timer-watchdog.path shell-timer-watchdog.timer shell-timer-watchdog.service; do
+        if systemctl list-unit-files "$unit" 2>/dev/null | grep -q "$unit"; then
+            systemctl disable --now "$unit" >/dev/null 2>&1 || true
+        fi
+    done
+    rm -f /etc/systemd/system/shell-timer-watchdog.path \
+          /etc/systemd/system/shell-timer-watchdog.service \
+          /etc/systemd/system/shell-timer-watchdog.timer
+    systemctl daemon-reload 2>/dev/null || true
+    rm -f /usr/local/shell-access-manager/ispconfig-redeploy.sh
+    rm -rf /usr/local/shell-access-manager/ispconfig-templates
+    log_ok "Watchdog eltávolítva (systemd units + templates)"
+
     # Remove web files
     if [ -d "$SHELL_TIMER_DIR" ]; then
         rm -rf "$SHELL_TIMER_DIR"
@@ -214,10 +232,13 @@ do_uninstall() {
 
     # Remove from ISPConfig vhost
     for vhost in /etc/apache2/sites-available/ispconfig.vhost /etc/apache2/sites-available/ispconfig.conf; do
-        if [ -f "$vhost" ] && grep -q "shell-timer-integration" "$vhost" 2>/dev/null; then
-            sed -i '/Shell Timer Integration/,/IfModule>/d' "$vhost"
+        if [ -f "$vhost" ]; then
+            # Backup, then strip every known shell-timer leftover (legacy v1, v2 Include, marker)
+            cp "$vhost" "${vhost}.bak.uninstall.$(date +%Y%m%d%H%M%S)"
+            sed -i '/Shell Timer Integration/,/<\/IfModule>/d' "$vhost"
+            sed -i '\|Include conf-available/shell-timer\.conf|d' "$vhost"
             sed -i '/shell-timer-integration/d' "$vhost"
-            # Clean up empty lines
+            # Clean up consecutive empty lines
             sed -i '/^$/N;/^\n$/d' "$vhost"
             log_ok "Vhost megtisztítva: $vhost"
         fi

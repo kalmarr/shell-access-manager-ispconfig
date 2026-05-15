@@ -1,0 +1,14 @@
+[Unit]
+Description=Watch ISPConfig version for updates and restore Shell Timer plugin
+Documentation=https://github.com/kalmarr/shell-access-manager-ispconfig
+
+[Path]
+# Triggers whenever ISPConfig writes a new version (i.e. after every update).
+# The shell_timer/ files get restored by the service unit.
+# Fallback for the rare case where version.inc.php is unchanged but files
+# vanish (manual rm, etc.) is the hourly timer unit.
+PathModified=/usr/local/ispconfig/interface/lib/classes/version.inc.php
+Unit=shell-timer-watchdog.service
+
+[Install]
+WantedBy=multi-user.target

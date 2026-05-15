@@ -1,0 +1,13 @@
+[Unit]
+Description=Hourly safety net for Shell Timer plugin restoration
+
+[Timer]
+# Fallback safety net: even if the path-unit doesn't fire (e.g. version
+# file unchanged but files deleted by hand), this catches it within 1 hour.
+OnBootSec=2min
+OnUnitActiveSec=1h
+Persistent=true
+Unit=shell-timer-watchdog.service
+
+[Install]
+WantedBy=timers.target

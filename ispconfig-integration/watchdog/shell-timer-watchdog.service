@@ -1,0 +1,13 @@
+[Unit]
+Description=Restore Shell Timer plugin files in ISPConfig web tree
+Documentation=https://github.com/kalmarr/shell-access-manager-ispconfig
+After=apache2.service network.target
+
+[Service]
+Type=oneshot
+# Give the ISPConfig updater 30s to finish its rsync before we redeploy.
+# This avoids racing against an in-flight update.
+ExecStartPre=/bin/sleep 30
+ExecStart=/usr/local/shell-access-manager/ispconfig-redeploy.sh
+StandardOutput=journal
+StandardError=journal

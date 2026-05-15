@@ -19,6 +19,7 @@ Automatically disables shell users after idle timeout or hard time limit via ISP
 * **Logging** – Syslog + dedicated log file with logrotate
 * **Concurrent safety** – Lock file prevents parallel monitor execution
 * **ISPConfig Panel Integration** – Optional web UI with countdown timers, dashboard, and enable/disable buttons (zero ISPConfig files modified!)
+* **Update-safe watchdog** – systemd path-unit + hourly timer automatically restore the plugin files within ~30 seconds if an ISPConfig update wipes them
 
 ## How It Works
 
@@ -155,13 +156,30 @@ A web-based UI that adds countdown timers, status indicators, and enable/disable
 * **Shell Timer Dashboard** – Dedicated page accessible from the Sites menu showing all users with real-time status
 * **Auto-refresh** – Dashboard refreshes every 30 seconds, edit page countdown updates every second
 
-### How It Works (Update-Safe!)
+### How It Works (Update-Safe via Watchdog)
 
 **Zero ISPConfig files are modified.** The integration uses:
 
 1. **Apache `mod_substitute`** – Injects a `<script>` tag into ISPConfig HTML responses via the vhost config (ISPConfig updates don't touch the vhost)
-2. **Custom directory** – All files live in `/usr/local/ispconfig/interface/web/shell_timer/` which ISPConfig updates never touch
+2. **Custom directory** – Plugin files live in `/usr/local/ispconfig/interface/web/shell_timer/`
 3. **Sudoers** – Allows the web process to call enable/disable scripts via `sudo`
+
+#### Update-safe watchdog
+
+Some ISPConfig releases run an `rsync --delete` over `interface/web/`, which can wipe the `shell_timer/` directory. To prevent the plugin from "disappearing" after an update, a **systemd watchdog** is installed alongside it:
+
+* **Template store** – `/usr/local/shell-access-manager/ispconfig-templates/` holds a pristine copy of the plugin files **outside** the ISPConfig tree (so the updater can't touch it).
+* **`shell-timer-watchdog.path`** – Reactive systemd path-unit. Triggers as soon as ISPConfig writes a new version (`version.inc.php` changes).
+* **`shell-timer-watchdog.service`** – Sleeps 30s (waits for the updater to finish), then runs `ispconfig-redeploy.sh` which idempotently restores any missing or modified plugin file from the template store, re-injects the vhost directive if needed, and reloads Apache only when something actually changed.
+* **`shell-timer-watchdog.timer`** – Hourly safety net, in case files vanish without a version bump.
+
+Net effect: after an ISPConfig update, the Timer overlay is back **within ~30 seconds** without any manual action.
+
+Inspect with:
+```
+systemctl status shell-timer-watchdog.path shell-timer-watchdog.timer
+journalctl -t shell-timer-watchdog -n 20
+```
 
 ### Install ISPConfig Integration
 
@@ -203,6 +221,11 @@ This only removes the panel integration; the base shell access manager remains i
 | `ispconfig-integration/shell_timer/api.php` | AJAX API endpoint |
 | `ispconfig-integration/shell_timer/timer.js` | Frontend JS (list/edit page enhancement) |
 | `ispconfig-integration/shell_timer/dashboard.php` | Dashboard page |
+| `ispconfig-integration/watchdog/ispconfig-redeploy.sh` | Idempotent restore script (deployed to `/usr/local/shell-access-manager/`) |
+| `ispconfig-integration/watchdog/shell-timer-watchdog.path` | systemd path-unit reacting to ISPConfig updates |
+| `ispconfig-integration/watchdog/shell-timer-watchdog.service` | systemd oneshot service running the redeploy script |
+| `ispconfig-integration/watchdog/shell-timer-watchdog.timer` | systemd hourly safety-net timer |
+| `ispconfig-integration/README-watchdog.md` | Watchdog architecture & manual test instructions |
 
 ## Security Notes
 
@@ -238,6 +261,7 @@ Automatikus időzített SSH shell user kezelés ISPConfig 3.3.x szerverekhez.
 * **ISPConfig API integráció** – A hivatalos Remote JSON API-t használja
 * **Jailkit kompatibilis** – `pgrep` alapú process detektálás (működik jailkit chroot-ban is)
 * **ISPConfig Panel Integráció** – Opcionális webes UI visszaszámlálóval, dashboarddal, és enable/disable gombokkal
+* **Frissítés-biztos watchdog** – systemd path-unit + óránkénti timer automatikusan visszaállítja a plugin fájlokat ~30 másodpercen belül, ha egy ISPConfig frissítés letörölné őket
 
 ### Telepítés
 
