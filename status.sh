@@ -26,7 +26,11 @@ mysql -e "
     SELECT
         su.username AS 'User',
         su.active AS 'Active',
-        su.chroot AS 'Chroot',
+        CASE
+            WHEN su.chroot = 'jailkit' THEN 'Jailkit (restricted)'
+            WHEN su.chroot IN ('no', '') THEN 'None (full shell)'
+            ELSE su.chroot
+        END AS 'Access mode',
         su.ssh_rsa AS 'Has SSH Key',
         w.domain AS 'Website'
     FROM ${ISPCONFIG_DB}.shell_user su
@@ -38,7 +42,7 @@ mysql -e "
 echo ""
 
 ACTIVE_USERS=$(mysql -Nse "
-    SELECT su.username, su.shell_user_id
+    SELECT su.username, su.shell_user_id, su.chroot
     FROM ${ISPCONFIG_DB}.shell_user su
     WHERE su.active = 'y'
     $([ -n "$USERNAME" ] && echo "AND su.username = '$USERNAME'")
@@ -49,9 +53,15 @@ if [ -n "$ACTIVE_USERS" ]; then
     echo "│ Active shell user details:                                     │"
     echo "├─────────────────────────────────────────────────────────────────┤"
 
-    while IFS=$'\t' read -r UNAME SU_ID; do
+    while IFS=$'\t' read -r UNAME SU_ID CHROOT_VAL; do
         LAST_ACTIVITY=$(get_last_ssh_activity "$UNAME")
         ACTIVE_SESSIONS=$(who | grep "^${UNAME} " | wc -l)
+
+        case "$CHROOT_VAL" in
+            jailkit)   ACCESS_MODE="Jailkit (restricted)" ;;
+            no|"")     ACCESS_MODE="None (full shell)" ;;
+            *)         ACCESS_MODE="$CHROOT_VAL" ;;
+        esac
 
         ENABLED_FILE="${STATE_DIR}/${UNAME}.enabled"
         if [ -f "$ENABLED_FILE" ]; then
@@ -75,6 +85,15 @@ if [ -n "$ACTIVE_USERS" ]; then
             HARD_INFO="not set"
         fi
 
+        SEEN_FILE="${STATE_DIR}/${UNAME}.last_seen_active"
+        if [ -f "$SEEN_FILE" ]; then
+            SEEN_EPOCH=$(cat "$SEEN_FILE")
+            SEEN_AGO=$((NOW_EPOCH - SEEN_EPOCH))
+            SEEN_INFO="last seen active: $(seconds_to_human $SEEN_AGO) ago"
+        else
+            SEEN_INFO="last seen active: never"
+        fi
+
         if [ "$LAST_ACTIVITY" = "ACTIVE" ]; then
             IDLE_INFO="⚡ Active session ($ACTIVE_SESSIONS)"
         elif [ "$LAST_ACTIVITY" -gt 0 ] 2>/dev/null; then
@@ -88,10 +107,12 @@ if [ -n "$ACTIVE_USERS" ]; then
 
         echo "│"
         echo "│  👤 $UNAME"
-        echo "│     Enabled at:   $ENABLED_SINCE ($ELAPSED_HUMAN)"
-        echo "│     Hard limit:   $HARD_INFO"
-        echo "│     Activity:     $IDLE_INFO"
-        echo "│     Sessions:     $ACTIVE_SESSIONS active"
+        echo "│     Access mode: $ACCESS_MODE"
+        echo "│     Enabled at:  $ENABLED_SINCE ($ELAPSED_HUMAN)"
+        echo "│     Hard limit:  $HARD_INFO"
+        echo "│     Activity:    $IDLE_INFO"
+        echo "│     Tracker:     $SEEN_INFO"
+        echo "│     Sessions:    $ACTIVE_SESSIONS active"
 
     done <<< "$ACTIVE_USERS"
 

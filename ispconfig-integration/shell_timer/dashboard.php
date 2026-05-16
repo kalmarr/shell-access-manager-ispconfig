@@ -64,8 +64,8 @@ $is_admin = (isset($_SESSION['s']['user']['typ']) && $_SESSION['s']['user']['typ
     }
 
     function chrootBadge(chroot) {
-        if (chroot === 'jailkit') return '<span class="label label-info" style="font-size:11px">jailkit</span>';
-        if (chroot === 'no' || chroot === '') return '<span class="label label-danger" style="font-size:11px">FULL ⚠</span>';
+        if (chroot === 'jailkit') return '<span class="label label-info" style="font-size:11px">Jailkit (korlátozott)</span>';
+        if (chroot === 'no' || chroot === '') return '<span class="label label-danger" style="font-size:11px">Teljes shell ⚠️</span>';
         return '<span class="label label-default" style="font-size:11px">' + (chroot || '?') + '</span>';
     }
 

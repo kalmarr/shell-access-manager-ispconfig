@@ -37,7 +37,7 @@ if [ -z "$SESSION" ]; then
     log ERROR "Cannot connect to ISPConfig API"
     log WARN "Falling back to direct DB update"
     mysql -e "UPDATE ${ISPCONFIG_DB}.shell_user SET
-        active='n', chroot='jailkit',
+        active='n',
         sys_updated=UNIX_TIMESTAMP(),
         sys_update_done='n'
         WHERE shell_user_id=${SHELL_USER_ID};" 2>/dev/null
@@ -60,13 +60,13 @@ trap '[ -n "$SESSION" ] && api_logout "$SESSION"' EXIT
 if [ -n "$SESSION" ]; then
     CLIENT_ID=0
 
-    UPDATE_RESULT=$(api_update_shell_user "$SESSION" "$CLIENT_ID" "$SHELL_USER_ID" '{"active": "n", "chroot": "jailkit"}')
+    UPDATE_RESULT=$(api_update_shell_user "$SESSION" "$CLIENT_ID" "$SHELL_USER_ID" '{"active": "n"}')
     UPDATE_OK=$(echo "$UPDATE_RESULT" | jq -r '.response // empty' 2>/dev/null)
     if [ -z "$UPDATE_OK" ] || [ "$UPDATE_OK" = "false" ]; then
         ERROR_MSG=$(echo "$UPDATE_RESULT" | jq -r '.message // "unknown"' 2>/dev/null)
         log ERROR "API update failed: $ERROR_MSG - trying DB fallback"
         mysql -e "UPDATE ${ISPCONFIG_DB}.shell_user SET
-            active='n', chroot='jailkit',
+            active='n',
             sys_updated=UNIX_TIMESTAMP(),
             sys_update_done='n'
             WHERE shell_user_id=${SHELL_USER_ID};" 2>/dev/null
@@ -97,6 +97,7 @@ fi
 # --- Cleanup state files ---
 rm -f "${STATE_DIR}/${USERNAME}.enabled"
 rm -f "${STATE_DIR}/${USERNAME}.hard_limit"
+rm -f "${STATE_DIR}/${USERNAME}.last_seen_active"
 
 AT_JOB_FILE="${STATE_DIR}/${USERNAME}.at_job"
 if [ -f "$AT_JOB_FILE" ]; then

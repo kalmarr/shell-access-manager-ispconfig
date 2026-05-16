@@ -41,15 +41,26 @@ while IFS=$'\t' read -r SHELL_USER_ID USERNAME SYS_USERID CLIENT_ID; do
     LAST_ACTIVITY=$(get_last_ssh_activity "$USERNAME")
 
     if [ "$LAST_ACTIVITY" = "ACTIVE" ]; then
-        log INFO "  $USERNAME: active SSH session - skip"
+        log INFO "  $USERNAME: active SSH session - skip idle check"
 
-        # Hard limit ellenőrzés aktív session-nél is
         ENABLED_FILE="${STATE_DIR}/${USERNAME}.enabled"
+
+        # Auto-register web-enabled users (configurable)
         if [ ! -f "$ENABLED_FILE" ]; then
-            log WARN "  $USERNAME: active session but no state file - auto-registering"
-            echo "$NOW_EPOCH" > "${STATE_DIR}/${USERNAME}.enabled"
-            echo "$HARD_LIMIT" > "${STATE_DIR}/${USERNAME}.hard_limit"
+            if [ "${AUTO_REGISTER_WEB_USERS:-true}" = "true" ]; then
+                log WARN "  $USERNAME: active session but no state file - auto-registering"
+                echo "$NOW_EPOCH" > "${STATE_DIR}/${USERNAME}.enabled"
+                echo "$HARD_LIMIT" > "${STATE_DIR}/${USERNAME}.hard_limit"
+            else
+                log INFO "  $USERNAME: no state file, AUTO_REGISTER_WEB_USERS=false - skip"
+                # Still bump last_seen_active so a later toggle to true won't
+                # treat the user as immediately idle.
+                echo "$NOW_EPOCH" > "${STATE_DIR}/${USERNAME}.last_seen_active"
+                continue
+            fi
         fi
+
+        # Hard limit check FIRST — absolute ceiling, fires even on active sessions
         if [ -f "$ENABLED_FILE" ]; then
             ENABLED_EPOCH=$(cat "$ENABLED_FILE")
             HARD_LIMIT_FILE="${STATE_DIR}/${USERNAME}.hard_limit"
@@ -62,9 +73,16 @@ while IFS=$'\t' read -r SHELL_USER_ID USERNAME SYS_USERID CLIENT_ID; do
                     log WARN "  $USERNAME: HARD LIMIT exceeded (${ELAPSED}s >= ${EFFECTIVE_HARD}s) even with active session!"
                     "${SCRIPT_DIR}/disable-shell-user.sh" "$USERNAME" "hard-limit-expired"
                     USERS_DISABLED=$((USERS_DISABLED + 1))
+                    continue
                 fi
             fi
         fi
+
+        # Sliding window: record that we saw activity NOW.
+        # When the user goes idle later, the idle timer counts from this
+        # timestamp (not from their last login), so long active sessions
+        # don't trigger instant disable on logout.
+        echo "$NOW_EPOCH" > "${STATE_DIR}/${USERNAME}.last_seen_active"
         continue
     fi
 
@@ -75,12 +93,17 @@ while IFS=$'\t' read -r SHELL_USER_ID USERNAME SYS_USERID CLIENT_ID; do
             LAST_ACTIVITY=$(cat "$ENABLED_FILE")
             log INFO "  $USERNAME: never logged in, using enable time as reference"
         else
-            # AUTO-REGISTER: webes felületen bekapcsolt user
-            log WARN "  $USERNAME: active in DB but no state file - auto-registering now"
-            echo "$NOW_EPOCH" > "${STATE_DIR}/${USERNAME}.enabled"
-            echo "$HARD_LIMIT" > "${STATE_DIR}/${USERNAME}.hard_limit"
-            LAST_ACTIVITY=$NOW_EPOCH
-            log INFO "  $USERNAME: state file created, tracking starts (idle: ${IDLE_LIMIT}s, hard: ${HARD_LIMIT}s)"
+            if [ "${AUTO_REGISTER_WEB_USERS:-true}" = "true" ]; then
+                # AUTO-REGISTER: user enabled via web panel
+                log WARN "  $USERNAME: active in DB but no state file - auto-registering now"
+                echo "$NOW_EPOCH" > "${STATE_DIR}/${USERNAME}.enabled"
+                echo "$HARD_LIMIT" > "${STATE_DIR}/${USERNAME}.hard_limit"
+                LAST_ACTIVITY=$NOW_EPOCH
+                log INFO "  $USERNAME: state file created, tracking starts (idle: ${IDLE_LIMIT}s, hard: ${HARD_LIMIT}s)"
+            else
+                log INFO "  $USERNAME: no activity data, no state file, AUTO_REGISTER_WEB_USERS=false - skip"
+                continue
+            fi
         fi
     fi
 

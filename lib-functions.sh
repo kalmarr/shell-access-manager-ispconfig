@@ -105,9 +105,16 @@ get_last_ssh_activity() {
     local username="$1" last_epoch=0
 
     # 1. Active processes? (works with jailkit chroot - who/utmp does NOT)
-    #    If ANY process is running under this user -> ACTIVE
-    #    Idle timeout only applies when ALL processes have stopped
-    local active_procs=$(pgrep -u "$username" 2>/dev/null | wc -l)
+    #    pgrep -U uses UID -> reliable even when name resolution is weird in jails
+    local uid
+    uid=$(id -u "$username" 2>/dev/null)
+    local active_procs=0
+    if [ -n "$uid" ]; then
+        active_procs=$(pgrep -U "$uid" 2>/dev/null | wc -l)
+    fi
+    if [ "$active_procs" -eq 0 ]; then
+        active_procs=$(pgrep -u "$username" 2>/dev/null | wc -l)
+    fi
     if [ "$active_procs" -gt 0 ]; then
         log INFO "  $username: $active_procs process(es) running - ACTIVE"
         echo "ACTIVE"
@@ -115,39 +122,85 @@ get_last_ssh_activity() {
     fi
 
     # 2. Check auth.log for last session close
+    #    Ubuntu 24.04 / Debian 12 rsyslog defaults to ISO 8601 timestamps:
+    #      2026-05-16T16:30:01.123456+02:00 host sshd[…]: ...
+    #    Classic syslog format:
+    #      May 16 16:30:01 host sshd[…]: ...
+    #    Detect and parse accordingly.
     local auth_log="/var/log/auth.log"
     [ ! -f "$auth_log" ] && auth_log="/var/log/secure"
-    if [ -f "$auth_log" ]; then
-        local last_close=$(grep -E "(session closed|Disconnected from).*${username}" "$auth_log" 2>/dev/null | tail -1 | awk '{print $1" "$2" "$3}')
-        if [ -n "$last_close" ]; then
-            local close_epoch=$(date -d "$last_close" +%s 2>/dev/null)
-            [ -n "$close_epoch" ] && [ "$close_epoch" -gt "$last_epoch" ] && last_epoch=$close_epoch
+    if [ -f "$auth_log" ] && [ -r "$auth_log" ]; then
+        local last_close_line
+        last_close_line=$(grep -E "(session closed|Disconnected from).*${username}" "$auth_log" 2>/dev/null | tail -1)
+        if [ -n "$last_close_line" ]; then
+            local ts_field
+            if [[ "$last_close_line" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T ]]; then
+                # ISO 8601: take just the first whitespace-separated field
+                ts_field=$(awk '{print $1}' <<<"$last_close_line")
+            else
+                # Classic syslog: month day time
+                ts_field=$(awk '{print $1" "$2" "$3}' <<<"$last_close_line")
+            fi
+            local close_epoch
+            close_epoch=$(date -d "$ts_field" +%s 2>/dev/null)
+            if [ -n "$close_epoch" ] && [ "$close_epoch" -gt 0 ]; then
+                [ "$close_epoch" -gt "$last_epoch" ] && last_epoch=$close_epoch
+            else
+                log WARN "  $username: failed to parse auth.log timestamp: '$ts_field'"
+            fi
         fi
     fi
 
-    # 3. lastlog fallback
-    if [ "$last_epoch" -eq 0 ]; then
-        local lastlog_time=$(lastlog -u "$username" 2>/dev/null | tail -1)
-        if ! echo "$lastlog_time" | grep -q "Never logged in"; then
-            local parsed=$(echo "$lastlog_time" | awk '{print $4" "$5" "$6" "$7" "$9}')
-            local parsed_epoch=$(date -d "$parsed" +%s 2>/dev/null)
-            [ -n "$parsed_epoch" ] && last_epoch=$parsed_epoch
+    # 3. journalctl fallback (covers journald-only systems where auth.log may be sparse)
+    if command -v journalctl &>/dev/null; then
+        local j_line
+        j_line=$(journalctl _COMM=sshd --since "1 week ago" -o short-iso --no-pager 2>/dev/null \
+                 | grep -E "(session closed|Disconnected from).*${username}" \
+                 | tail -1)
+        if [ -n "$j_line" ]; then
+            local j_ts
+            j_ts=$(awk '{print $1}' <<<"$j_line")
+            local j_epoch
+            j_epoch=$(date -d "$j_ts" +%s 2>/dev/null)
+            if [ -n "$j_epoch" ] && [ "$j_epoch" -gt 0 ] && [ "$j_epoch" -gt "$last_epoch" ]; then
+                last_epoch=$j_epoch
+            fi
         fi
     fi
 
-    # 4. State file as fallback if nothing else found
-    if [ "$last_epoch" -eq 0 ]; then
-        local state_file="${STATE_DIR}/${username}.enabled"
-        [ -f "$state_file" ] && last_epoch=$(cat "$state_file")
+    # 4. lastlog fallback (returns last LOGIN time, not last activity)
+    local lastlog_time
+    lastlog_time=$(lastlog -u "$username" 2>/dev/null | tail -1)
+    if ! echo "$lastlog_time" | grep -q "Never logged in"; then
+        local parsed
+        parsed=$(echo "$lastlog_time" | awk '{print $4" "$5" "$6" "$7" "$9}')
+        local parsed_epoch
+        parsed_epoch=$(date -d "$parsed" +%s 2>/dev/null)
+        if [ -n "$parsed_epoch" ] && [ "$parsed_epoch" -gt 0 ] && [ "$parsed_epoch" -gt "$last_epoch" ]; then
+            last_epoch=$parsed_epoch
+        fi
     fi
 
-    # 5. FLOOR: enable timestamp is always the minimum
-    #    You can't be "idle" from before you were enabled!
-    #    This prevents old auth.log entries from causing instant disable after re-enable.
+    # 5. last_seen_active state file — written by the monitor whenever it
+    #    observed ACTIVE processes for this user. This is the authoritative
+    #    "sliding window" source: as long as the user keeps working, this
+    #    timestamp advances every monitor tick.
+    local seen_file="${STATE_DIR}/${username}.last_seen_active"
+    if [ -f "$seen_file" ]; then
+        local seen_epoch
+        seen_epoch=$(cat "$seen_file" 2>/dev/null)
+        if [ -n "$seen_epoch" ] && [ "$seen_epoch" -gt "$last_epoch" ] 2>/dev/null; then
+            last_epoch=$seen_epoch
+        fi
+    fi
+
+    # 6. FLOOR: enable timestamp is always the minimum
+    #    Prevents old auth.log entries from causing instant disable after re-enable.
     local enabled_file="${STATE_DIR}/${username}.enabled"
     if [ -f "$enabled_file" ]; then
-        local enabled_epoch=$(cat "$enabled_file")
-        if [ "$last_epoch" -lt "$enabled_epoch" ]; then
+        local enabled_epoch
+        enabled_epoch=$(cat "$enabled_file" 2>/dev/null)
+        if [ -n "$enabled_epoch" ] && [ "$last_epoch" -lt "$enabled_epoch" ] 2>/dev/null; then
             log INFO "  $username: activity ($last_epoch) predates enable ($enabled_epoch) - using enable time as floor"
             last_epoch=$enabled_epoch
         fi

@@ -69,6 +69,9 @@ fi
 NOW_EPOCH=$(date +%s)
 echo "$NOW_EPOCH" > "${STATE_DIR}/${USERNAME}.enabled"
 echo "$EFFECTIVE_HARD_LIMIT" > "${STATE_DIR}/${USERNAME}.hard_limit"
+# Initialize sliding-window activity timestamp so the monitor doesn't think
+# the user is already idle before their first login.
+echo "$NOW_EPOCH" > "${STATE_DIR}/${USERNAME}.last_seen_active"
 
 # Schedule hard limit at-job
 if [ "$EFFECTIVE_HARD_LIMIT" -gt 0 ]; then

@@ -13,7 +13,7 @@ Automatically disables shell users after idle timeout or hard time limit via ISP
 * **Hard time limit** – Maximum session lifetime regardless of activity (default: 8 hours)
 * **ISPConfig API integration** – Uses the official Remote JSON API, keeping the ISPConfig panel in sync
 * **Jailkit compatible** – Uses `pgrep` for process detection (works with jailkit chroot where `who`/`utmp` does not)
-* **Jailkit on disable** – Automatically sets chroot to jailkit when disabling
+* **Preserves chroot setting** – Only toggles `active`; the user's original chroot value (None / Jailkit) is left untouched
 * **DB fallback** – Falls back to direct database updates if the API is unavailable
 * **Email notifications** – Alerts on enable, disable, and errors
 * **Logging** – Syslog + dedicated log file with logrotate
@@ -43,7 +43,7 @@ Automatically disables shell users after idle timeout or hard time limit via ISP
                     ┌────────▼─────────┐    ┌─────────────────────┐
                     │  disable.sh       │───>│  ISPConfig API      │
                     │  (automatic)      │    │  active = 'n'       │
-                    └──────────────────┘    │  chroot = jailkit   │
+                    └──────────────────┘    │  (chroot untouched) │
                                            │  + session kill      │
                                            │  + email alert       │
                                            └─────────────────────┘
@@ -232,7 +232,7 @@ This only removes the panel integration; the base shell access manager remains i
 * Config file is chmod 600 (only root can read the API password)
 * Remote API user has minimal permissions (Shell User Get + Update only)
 * Disable gracefully terminates active sessions (HUP → TERM → KILL)
-* Jailkit chroot is enforced on disable
+* Disable does not alter the user's chroot setting (preserves the original None / Jailkit configuration)
 * ISPConfig integration: admin-only for enable/disable actions
 * ISPConfig integration: sudoers with NOPASSWD only for specific scripts
 * Lock file prevents concurrent monitor execution

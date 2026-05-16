@@ -15,6 +15,14 @@ HARD_LIMIT=28800          # 8 hours - maximum lifetime (0 = no limit)
 # --- Monitoring ---
 CHECK_INTERVAL_MINUTES=10
 
+# When the monitor finds a shell user that is 'active' in ISPConfig but has
+# no state file (e.g. enabled directly via the ISPConfig web panel, not via
+# shell-enable), should it auto-register the user and start enforcing the
+# idle / hard limits?
+#   true  = panel-enabled users get the same time limits as CLI-enabled ones
+#   false = panel-enabled users run without limits (legacy behavior)
+AUTO_REGISTER_WEB_USERS=true
+
 # --- Logging ---
 LOG_FILE="/var/log/shell-access-manager.log"
 SYSLOG_ENABLED=true

@@ -123,21 +123,23 @@ if ($action === 'list') {
 function get_timer_status($username, $state_dir, $idle_limit, $hard_limit) {
     $now = time();
     $result = [
-        'enabled'        => false,
-        'enabled_at'     => null,
-        'hard_limit'     => 0,
-        'hard_remaining' => 0,
-        'idle_limit'     => $idle_limit,
-        'idle_elapsed'   => 0,
-        'idle_remaining' => 0,
-        'has_processes'  => false,
-        'process_count'  => 0,
-        'process_list'   => [],
-        'state'          => 'disabled'
+        'enabled'          => false,
+        'enabled_at'       => null,
+        'last_seen_active' => null,
+        'hard_limit'       => 0,
+        'hard_remaining'   => 0,
+        'idle_limit'       => $idle_limit,
+        'idle_elapsed'     => 0,
+        'idle_remaining'   => 0,
+        'has_processes'    => false,
+        'process_count'    => 0,
+        'process_list'     => [],
+        'state'            => 'disabled'
     ];
 
     $enabled_file = $state_dir . '/' . $username . '.enabled';
     $hard_file    = $state_dir . '/' . $username . '.hard_limit';
+    $seen_file    = $state_dir . '/' . $username . '.last_seen_active';
 
     if (file_exists($enabled_file)) {
         $enabled_epoch = (int)trim(file_get_contents($enabled_file));
@@ -152,6 +154,10 @@ function get_timer_status($username, $state_dir, $idle_limit, $hard_limit) {
         $result['hard_remaining'] = max(0, $effective_hard - ($now - $enabled_epoch));
     }
 
+    if (file_exists($seen_file)) {
+        $result['last_seen_active'] = (int)trim(file_get_contents($seen_file));
+    }
+
     // Running processes (pgrep - works with jailkit)
     $pgrep = [];
     exec("pgrep -u " . escapeshellarg($username) . " -la 2>/dev/null", $pgrep);
@@ -159,14 +165,18 @@ function get_timer_status($username, $state_dir, $idle_limit, $hard_limit) {
     $result['has_processes']  = $result['process_count'] > 0;
     $result['process_list']   = array_slice($pgrep, 0, 10);
 
-    // State logic (mirrors lib-functions.sh)
+    // State logic mirrors lib-functions.sh: use last_seen_active as the
+    // sliding-window reference for the idle timer, falling back to enable
+    // time when no activity has ever been recorded.
     if (!$result['enabled']) {
         $result['state'] = 'disabled';
     } elseif ($result['has_processes']) {
         $result['state']          = 'active';
         $result['idle_remaining'] = $idle_limit;
     } else {
-        $idle_seconds = $now - $result['enabled_at'];
+        $reference = $result['last_seen_active'] ?: $result['enabled_at'];
+        $idle_seconds = $now - $reference;
+        if ($idle_seconds < 0) $idle_seconds = 0;
         $result['idle_elapsed']   = $idle_seconds;
         $result['idle_remaining'] = max(0, $idle_limit - $idle_seconds);
 

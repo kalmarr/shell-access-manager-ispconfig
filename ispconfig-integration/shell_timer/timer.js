@@ -180,8 +180,8 @@
             td3.className = 'shell-timer-col';
             if (u) {
                 td3.innerHTML = u.chroot === 'jailkit'
-                    ? '<span class="label label-info" style="font-size:11px">jailkit</span>'
-                    : '<span class="label label-danger" style="font-size:11px">full ⚠</span>';
+                    ? '<span class="label label-info" style="font-size:11px">Jailkit (korlátozott)</span>'
+                    : '<span class="label label-danger" style="font-size:11px">Teljes shell ⚠️</span>';
             } else {
                 td3.textContent = '-';
             }
@@ -223,8 +223,8 @@
         // Chroot info
         const chrootSelect = document.querySelector('select[name="chroot"]');
         let accessLevel = chrootSelect ? chrootSelect.value : '?';
-        if (accessLevel === 'jailkit') accessLevel = 'jailkit (korlátozott)';
-        else if (accessLevel === 'no' || accessLevel === '') accessLevel = 'teljes hozzáférés ⚠️';
+        if (accessLevel === 'jailkit') accessLevel = 'Jailkit (korlátozott)';
+        else if (accessLevel === 'no' || accessLevel === '') accessLevel = 'Teljes shell ⚠️';
 
         // Processes
         let procHtml = '';
