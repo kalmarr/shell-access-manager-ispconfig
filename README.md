@@ -152,9 +152,39 @@ A web-based UI that adds countdown timers, status indicators, and enable/disable
 ### What It Adds
 
 * **SSH-User list page** – 3 new columns: Status (ACTIVE/IDLE/DISABLED), Time Remaining, Access Level
-* **SSH-User edit page** – Timer panel with live countdown, process list, and enable/disable buttons
+* **SSH-User edit page** – Timer panel with live countdown, process list, and start/restart/disable buttons
 * **Shell Timer Dashboard** – Dedicated page accessible from the Sites menu showing all users with real-time status
+* **Bulk actions** – Tick several users on the dashboard and start, restart or disable them in one go
 * **Auto-refresh** – Dashboard refreshes every 30 seconds, edit page countdown updates every second
+* **Stays on the page** – Every action re-renders in place instead of navigating back to the start page
+
+### Bulk Actions on the Dashboard
+
+Each dashboard row has a checkbox (admin only) and each table has a select-all box in its header.
+As soon as something is ticked, a sticky action bar appears:
+
+| Button | Effect |
+| --- | --- |
+| **Indítás 3ó** | Starts every selected user with a 3 hour window |
+| **8ó újraindítás** | Restarts the window at 8 hours for every selected user |
+| **Letiltás** | Disables every selected user |
+| **Kijelölés törlése** | Clears the selection |
+
+One confirmation dialog lists the affected users, then they are processed one after another with a
+per-row progress indicator, followed by a summary banner listing any failures. The selection survives
+the 30 second auto-refresh, and the refresh pauses while a bulk run is in progress.
+
+**The 8 hour action is a restart, not an extension.** `enable-shell-user.sh` rewrites the state files
+and reschedules the `at` job, so both the idle and the hard timer count from the moment the button is
+pressed. It never adds time to the current expiry.
+
+#### Why the buttons need `type="button"`
+
+ISPConfig loads every page into `#pageContent`, which sits **inside** its `<form id="pageForm">`.
+A `<button>` without an explicit type is a submit button, so clicking one submits that form, reloads
+`index.php` and drops the operator on the start page. All panel buttons therefore carry
+`type="button"`, use delegated click handlers rather than inline `onclick`, and no code path calls
+`location.reload()`.
 
 ### How It Works (Update-Safe via Watchdog)
 
@@ -220,12 +250,28 @@ This only removes the panel integration; the base shell access manager remains i
 | `ispconfig-integration/install.sh` | ISPConfig integration installer |
 | `ispconfig-integration/shell_timer/api.php` | AJAX API endpoint |
 | `ispconfig-integration/shell_timer/timer.js` | Frontend JS (list/edit page enhancement) |
-| `ispconfig-integration/shell_timer/dashboard.php` | Dashboard page |
+| `ispconfig-integration/shell_timer/dashboard.php` | Dashboard page with multi-select bulk actions |
 | `ispconfig-integration/watchdog/ispconfig-redeploy.sh` | Idempotent restore script (deployed to `/usr/local/shell-access-manager/`) |
 | `ispconfig-integration/watchdog/shell-timer-watchdog.path` | systemd path-unit reacting to ISPConfig updates |
 | `ispconfig-integration/watchdog/shell-timer-watchdog.service` | systemd oneshot service running the redeploy script |
 | `ispconfig-integration/watchdog/shell-timer-watchdog.timer` | systemd hourly safety-net timer |
 | `ispconfig-integration/README-watchdog.md` | Watchdog architecture & manual test instructions |
+
+Files created on the server by the integration installer:
+
+| Path | Description |
+| --- | --- |
+| `/var/lib/shell-access-manager/panel-limits.conf` | World-readable copy of `IDLE_LIMIT` / `HARD_LIMIT` for the panel |
+| `/var/backups/shell-timer/` | Backups of vhosts edited by the installer |
+
+**Why the limits are copied:** `shell-access-manager.conf` is mode 0600 root, so the panel process
+cannot read it and would silently display the built-in defaults (3h idle, 8h hard) instead of the
+configured values.
+
+**Why backups moved out of the vhost directory:** Apache parses every file in `sites-enabled`, so a
+`.bak` copy left beside the vhost is read as a second vhost and takes the whole config down with
+`Cannot define multiple Listeners on the same IP:port`. Backups now go to `/var/backups/shell-timer/`
+and the installer sweeps away any stray copy an earlier version left behind.
 
 ## Security Notes
 

@@ -38,12 +38,22 @@ if (in_array($action, ['enable', 'disable']) && !$is_admin) {
 
 // Config
 $state_dir = '/var/lib/shell-access-manager';
-$conf_file = '/usr/local/shell-access-manager/shell-access-manager.conf';
 $idle_limit = 10800;
 $hard_limit = 28800;
 
-if (file_exists($conf_file)) {
+// shell-access-manager.conf is mode 0600 root, so the panel process cannot read
+// it and would silently display the defaults above instead of the configured
+// limits. The installer publishes a world-readable copy of just those two
+// numbers next to the state files. Both are read, least authoritative first,
+// so a genuinely readable main config still wins.
+$conf_files = [
+    $state_dir . '/panel-limits.conf',
+    '/usr/local/shell-access-manager/shell-access-manager.conf'
+];
+foreach ($conf_files as $conf_file) {
+    if (!is_readable($conf_file)) continue;
     $lines = file($conf_file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    if ($lines === false) continue;
     foreach ($lines as $line) {
         $line = trim($line);
         if ($line === '' || $line[0] === '#') continue;
@@ -97,23 +107,40 @@ if ($action === 'list') {
     $retval = 0;
     exec("sudo /usr/local/shell-access-manager/enable-shell-user.sh " .
          escapeshellarg($username) . " " . (int)$hours . " 2>&1", $output, $retval);
-    echo json_encode([
-        'status' => $retval === 0 ? 'ok' : 'error',
-        'output' => implode("\n", $output)
-    ]);
+    echo json_encode(script_result($username, $output, $retval, $hours));
 
 } elseif ($action === 'disable' && $username) {
     $output = [];
     $retval = 0;
     exec("sudo /usr/local/shell-access-manager/disable-shell-user.sh " .
          escapeshellarg($username) . " manual-ispconfig 2>&1", $output, $retval);
-    echo json_encode([
-        'status' => $retval === 0 ? 'ok' : 'error',
-        'output' => implode("\n", $output)
-    ]);
+    echo json_encode(script_result($username, $output, $retval, null));
 
 } else {
     echo json_encode(['error' => 'Invalid action or missing username']);
+}
+
+// ============================================================
+// Result helper for enable/disable
+//
+// The dashboard's bulk runner pairs every answer with its table row, so the
+// username is echoed back. A failing script does not always print anything,
+// so give the summary something better than a blank "unknown" to show.
+// ============================================================
+
+function script_result($username, $output, $retval, $hours) {
+    $text = trim(implode("\n", $output));
+    $res = [
+        'status'   => $retval === 0 ? 'ok' : 'error',
+        'username' => $username,
+        'output'   => $text
+    ];
+    if ($hours !== null) $res['hours'] = (int)$hours;
+    if ($retval !== 0 && $text === '') {
+        $res['error'] = 'A szkript hibakoddal lepett ki (exit ' . (int)$retval . '), kimenet nelkul. '
+                      . 'Ellenorizd: /var/log/shell-access-manager.log';
+    }
+    return $res;
 }
 
 // ============================================================
@@ -174,7 +201,14 @@ function get_timer_status($username, $state_dir, $idle_limit, $hard_limit) {
         $result['state']          = 'active';
         $result['idle_remaining'] = $idle_limit;
     } else {
-        $reference = $result['last_seen_active'] ?: $result['enabled_at'];
+        // monitor-idle-users.sh takes the LATEST of the references, not the first
+        // non-empty one. With ?: a last_seen_active older than the enable time
+        // (a user re-enabled before the monitor's next 10 minute pass) would be
+        // reported as already idle, or even expired, right after being started.
+        $reference = (int)$result['enabled_at'];
+        if ($result['last_seen_active'] !== null && $result['last_seen_active'] > $reference) {
+            $reference = (int)$result['last_seen_active'];
+        }
         $idle_seconds = $now - $reference;
         if ($idle_seconds < 0) $idle_seconds = 0;
         $result['idle_elapsed']   = $idle_seconds;
