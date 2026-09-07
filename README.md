@@ -278,6 +278,15 @@ and the watchdog resolve every candidate with `readlink -f`, de-duplicate, and i
 distinct real file, always through the resolved path: `sed -i` on a symlink replaces it with a
 regular file and quietly forks the config.
 
+**A candidate must also actually be the panel's vhost.** The filename is not enough. On some hosts
+`sites-available/ispconfig.conf` is ISPConfig's *global* Apache config, generated from
+`apache_ispconfig.conf.master`: `ServerTokens`, `DirectoryIndex`, vlogger settings and a few
+`NameVirtualHost` lines, with no `<VirtualHost>` block and no reference to the panel docroot. It is
+enabled through `sites-enabled/000-ispconfig.conf`, so it looks live, and it sits right next to the
+real `ispconfig.vhost`. The name is inherited from older distributions where the panel vhost really
+was called `ispconfig.conf`. A candidate therefore has to contain `</VirtualHost>` **and** reference
+`/usr/local/ispconfig/interface/web` or `/var/www/ispconfig`; anything else is skipped.
+
 Because file contents prove nothing here, install and `status` finish by fetching the panel's own
 login page and counting `timer.js` references. Exactly one is correct. Zero means the injection
 never reaches the browser, two means two mechanisms are active and the script would run twice.
@@ -300,6 +309,22 @@ configured values.
 `.bak` copy left beside the vhost is read as a second vhost and takes the whole config down with
 `Cannot define multiple Listeners on the same IP:port`. Backups now go to `/var/backups/shell-timer/`
 and the installer sweeps away any stray copy an earlier version left behind.
+
+## Troubleshooting
+
+`sudo bash ispconfig-integration/install.sh status` answers most of these; it ends with a live
+request against the panel and reports how many times the page references `timer.js`.
+
+| Symptom | Cause | Check | Fix |
+| --- | --- | --- | --- |
+| No **Shell Timer** item in the Sites menu, no timer panel, after a full page reload | Nothing injects the script tag, so `timer.js` never loads and cannot add the nav item | `curl -sk https://127.0.0.1:8080/login/ \| grep -c shell_timer/timer.js` returns 0 | Re-run the installer; it injects into every real panel vhost and verifies the result |
+| The panel jumps back to the start page after clicking a timer button | An old `timer.js` / `dashboard.php` is deployed, whose buttons have no `type="button"` and so submit ISPConfig's `pageForm` | `grep -c 'type="button"' /usr/local/ispconfig/interface/web/shell_timer/dashboard.php` returns 0 | Re-run the installer, then hard-reload the browser. The `?v=` cache-buster changes with the file |
+| Every enable/disable fails with `sudo: a password is required` | The sudoers grant names the wrong user: with mod_fcgid + suexec the panel runs as `ispconfig`, not `www-data` | `runuser -u ispconfig -- sudo -n -l /usr/local/shell-access-manager/enable-shell-user.sh` | Re-run the installer; it detects the panel user and proves the grant before finishing |
+| The dashboard shows a user as **LEJÁRT / expired** that the monitor still keeps enabled | Idle was counted from the enable time instead of the monitor's sliding `last_seen_active` window | Compare `<user>.enabled` and `<user>.last_seen_active` in `/var/lib/shell-access-manager/` | Deploy the current `api.php`; it takes the later of the two, like `monitor-idle-users.sh` |
+| The displayed idle/hard limits do not match the configuration | `shell-access-manager.conf` is 0600 root, unreadable for the panel, which then shows its built-in defaults | `cat /var/lib/shell-access-manager/panel-limits.conf` | Re-run the installer; it publishes the two limits in that readable file |
+| Apache refuses to start: `Cannot define multiple Listeners on the same IP:port` | A `.bak` copy of the vhost was left inside `sites-enabled`, which Apache parses as a second vhost | `ls /etc/apache2/sites-enabled/*.bak*` | Move it out; the installer sweeps strays into `/var/backups/shell-timer/` and never backs up in place |
+| Fixes come back undone about an hour later | The watchdog restores the panel files from `ispconfig-templates/`, and that store was older than the deploy | Compare the template files with the deployed ones; `status` flags a mismatch | Re-run `ispconfig-integration/install.sh`, which now owns the template store |
+| The script tag appears **twice** | Two mechanisms are active at once, typically a leftover `conf-enabled/shell-timer.conf` next to the vhost injection | The live check reports a count of 2 | Re-run the installer; it removes the older conf-available/cron variant |
 
 ## Security Notes
 
