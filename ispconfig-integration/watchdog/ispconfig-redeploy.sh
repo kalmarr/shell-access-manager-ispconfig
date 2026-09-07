@@ -4,28 +4,39 @@
 #
 # Restores /usr/local/ispconfig/interface/web/shell_timer/{api,timer,dashboard}
 # from the stable source at /usr/local/shell-access-manager/ispconfig-templates/
-# whenever the ISPConfig updater has wiped them.
+# whenever the ISPConfig updater has wiped them, and makes sure the Apache
+# injection is present in every vhost Apache actually reads.
 #
 # Invoked by:
-#   - shell-timer-watchdog.path  (reactive: when version.inc.php changes OR
-#                                 api.php disappears)
+#   - shell-timer-watchdog.path  (reactive: ISPConfig version file changes)
 #   - shell-timer-watchdog.timer (fallback: hourly safety net)
 #
-# Idempotent: if everything is in place and matches the templates, exits
-# without touching anything and without reloading Apache.
+# Idempotent: if everything matches, exits without touching anything and
+# without reloading Apache.
+#
+# The vhost, backup, sudoers and verification logic is shared with the
+# installer via lib-apache.sh. It used to be duplicated here and drifted:
+# both picked "the first candidate that exists", which on a host where
+# sites-enabled/000-ispconfig.vhost is a real file wrote the injection into a
+# dead sites-available copy and then reported success from that same file.
 # ============================================================
 
 set -uo pipefail
-# NOTE: no `-e` — we want best-effort behavior; a missing template should
-# log a warning and exit 0, not crash the systemd unit.
 
 TEMPLATES="/usr/local/shell-access-manager/ispconfig-templates"
 TARGET="/usr/local/ispconfig/interface/web/shell_timer"
-VHOST_MARKER="shell-timer-integration"
 SUDOERS_FILE="/etc/sudoers.d/shell-timer"
+LIB="/usr/local/shell-access-manager/lib-apache.sh"
 FILES=(api.php timer.js dashboard.php)
 
 log() { logger -t shell-timer-watchdog "$*"; echo "$*"; }
+
+if [ ! -f "$LIB" ]; then
+    log "ERROR: shared library missing: $LIB — run the integration installer"
+    exit 0
+fi
+ST_PANEL_DIR="$TARGET"
+. "$LIB"
 
 if [ ! -d "$TEMPLATES" ]; then
     log "ERROR: templates directory missing: $TEMPLATES — install incomplete?"
@@ -46,7 +57,7 @@ if [ ! -d "$TARGET" ]; then
     changed=1
 fi
 
-# ---- 2. Restore each file if missing or differs from template ----
+# ---- 2. Restore each file if missing or different from the template ----
 for f in "${FILES[@]}"; do
     src="$TEMPLATES/$f"
     dst="$TARGET/$f"
@@ -57,74 +68,60 @@ for f in "${FILES[@]}"; do
     if [ ! -f "$dst" ] || ! cmp -s "$src" "$dst"; then
         cp -f "$src" "$dst"
         chmod 644 "$dst"
-        if id ispconfig >/dev/null 2>&1; then
-            chown ispconfig:ispconfig "$dst"
-        fi
+        id ispconfig >/dev/null 2>&1 && chown ispconfig:ispconfig "$dst"
         log "Restored: $dst"
         changed=1
     fi
 done
 
-# ---- 3. Re-apply directory permissions (idempotent) ----
+# ---- 3. Directory permissions (idempotent) ----
 chmod 755 "$TARGET" 2>/dev/null || true
-if id ispconfig >/dev/null 2>&1; then
-    chown ispconfig:ispconfig "$TARGET" 2>/dev/null || true
-fi
+id ispconfig >/dev/null 2>&1 && chown ispconfig:ispconfig "$TARGET" 2>/dev/null || true
 
-# ---- 4. Verify the Apache vhost still has the mod_substitute injection ----
-vhost=""
-for v in /etc/apache2/sites-available/ispconfig.vhost \
-         /etc/apache2/sites-available/ispconfig.conf \
-         /etc/apache2/sites-enabled/000-ispconfig.vhost; do
-    [ -f "$v" ] && { vhost="$v"; break; }
-done
-
-if [ -n "$vhost" ] && ! grep -q "$VHOST_MARKER" "$vhost" 2>/dev/null; then
-    cp "$vhost" "${vhost}.bak.watchdog.$(date +%Y%m%d%H%M%S)"
-    # First strip any legacy v2 Include directive that points at a now-gone
-    # conf-available/shell-timer.conf — otherwise apache2ctl configtest fails.
-    sed -i '\|Include conf-available/shell-timer\.conf|d' "$vhost"
-    # Now inject the correct mod_substitute block (INFLATE chain + no-gzip)
-    sed -i '/<\/VirtualHost>/i \
-\
-    # --- Shell Timer Integration (do not remove) ---\
-    # shell-timer-integration\
-    SetEnv no-gzip 1\
-    <IfModule mod_substitute.c>\
-        AddOutputFilterByType INFLATE;SUBSTITUTE;DEFLATE text/html\
-        Substitute "s|</head>|<script src=\\x27/shell_timer/timer.js?v=2\\x27 defer></script></head>|ni"\
-    </IfModule>' "$vhost"
-    log "Re-injected vhost mod_substitute directive into $vhost"
+# ---- 4. A stray *.bak in sites-enabled breaks the whole Apache config ----
+swept=$(st_sweep_stray_backups)
+if [ -n "$swept" ]; then
+    log "Moved stray Apache backups out of sites-enabled:$swept"
     changed=1
 fi
 
-# ---- 5. Verify sudoers still in place ----
-if [ ! -f "$SUDOERS_FILE" ]; then
-    cat > "$SUDOERS_FILE" <<'SUDOERS'
-# Shell Timer - ISPConfig Integration (restored by watchdog)
-www-data ALL=(root) NOPASSWD: /usr/local/shell-access-manager/enable-shell-user.sh
-www-data ALL=(root) NOPASSWD: /usr/local/shell-access-manager/disable-shell-user.sh
-www-data ALL=(root) NOPASSWD: /usr/local/shell-access-manager/status.sh
-SUDOERS
-    chmod 440 "$SUDOERS_FILE"
-    if visudo -c -f "$SUDOERS_FILE" >/dev/null 2>&1; then
-        log "Restored sudoers: $SUDOERS_FILE"
+# ---- 5. Injection in every vhost Apache reads, with a current cache-buster ----
+hash=$(st_asset_hash "$TARGET/timer.js")
+synced=$(st_sync_vhosts "$hash")
+if [ -n "$synced" ]; then
+    while IFS= read -r line; do
+        [ -n "$line" ] && log "Vhost $line (v=$hash)"
+    done <<< "$synced"
+    changed=1
+fi
+
+# ---- 6. Sudoers, for the user the panel actually runs as ----
+panel_user=$(st_detect_panel_user)
+if [ ! -f "$SUDOERS_FILE" ] || ! st_check_sudo_for "$panel_user"; then
+    if st_write_sudoers "$SUDOERS_FILE" "$panel_user"; then
+        log "Restored sudoers for $panel_user: $SUDOERS_FILE"
         changed=1
     else
-        rm -f "$SUDOERS_FILE"
         log "ERROR: sudoers syntax check failed — removed $SUDOERS_FILE"
     fi
 fi
 
-# ---- 6. Reload Apache only if something actually changed ----
+# ---- 7. Reload Apache only if something actually changed ----
 if [ "$changed" -eq 1 ]; then
     if apache2ctl configtest 2>&1 | grep -q "Syntax OK"; then
         systemctl reload apache2 && log "Apache reloaded after watchdog redeploy"
     else
         log "ERROR: apache2ctl configtest failed — Apache NOT reloaded"
+        exit 0
     fi
-else
-    : # silent success — no log spam when nothing to do
+
+    # Prove the injection reaches the browser. Checking the config file only
+    # tells you what you wrote, not what Apache serves.
+    port=$(st_panel_port)
+    count=$(st_injection_count "$port")
+    if [ "$count" -ne 1 ]; then
+        log "ERROR: timer.js appears ${count}x in the panel HTML on port ${port} (expected exactly 1)"
+    fi
 fi
 
 exit 0
