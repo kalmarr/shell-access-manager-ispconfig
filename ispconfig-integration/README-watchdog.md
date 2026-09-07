@@ -44,6 +44,16 @@ ISPConfig update
 
 A "stabil forrás" (`/usr/local/shell-access-manager/ispconfig-templates/`) az ISPConfig fán **kívül** él, ezért az updater soha nem érinti.
 
+**A sablonokat az `ispconfig-integration/install.sh` frissíti**, minden telepítéskor, a most kitelepített
+fájlokból. Korábban ezt csak a repó gyökerében lévő `install.sh` tette meg, így aki az integrációs
+telepítőt futtatta önmagában, annál a sablonok régiek maradtak, és a watchdog egy órán belül
+visszaírta a régi fájlokat a frissen telepítettek helyére: minden deploy legfeljebb egy óráig élt.
+
+**A vhost-kezelés közös**, az `ispconfig-integration/lib-apache.sh` fájlban. A watchdog és a telepítő
+ugyanazt a `readlink -f`-fel feloldott, ténylegesen élő vhost-listát írja, ugyanoda ment
+(`/var/backups/shell-timer/`), és a végén mindkettő megnézi, hogy a panel HTML-jében pontosan egyszer
+szerepel-e a `timer.js`. Korábban a két szkriptben külön másolat élt ebből a logikából, és elcsúsztak.
+
 ## Naplózás
 
 Minden visszaállítás syslog-ba kerül `shell-timer-watchdog` taggel:

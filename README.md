@@ -190,7 +190,7 @@ A `<button>` without an explicit type is a submit button, so clicking one submit
 
 **Zero ISPConfig files are modified.** The integration uses:
 
-1. **Apache `mod_substitute`** – Injects a `<script>` tag into ISPConfig HTML responses via the vhost config (ISPConfig updates don't touch the vhost)
+1. **Apache `mod_substitute`** – Injects a `<script>` tag into ISPConfig HTML responses via the vhost config (ISPConfig updates don't touch the vhost). See **Which vhost gets the injection** below: the target is resolved with `readlink -f`, because Apache only reads `sites-enabled`
 2. **Custom directory** – Plugin files live in `/usr/local/ispconfig/interface/web/shell_timer/`
 3. **Sudoers** – Allows the panel process to call enable/disable scripts via `sudo`.
    The grant goes to the user the panel's PHP **actually** runs as, which with the default
@@ -263,7 +263,27 @@ This only removes the panel integration; the base shell access manager remains i
 | `ispconfig-integration/watchdog/shell-timer-watchdog.path` | systemd path-unit reacting to ISPConfig updates |
 | `ispconfig-integration/watchdog/shell-timer-watchdog.service` | systemd oneshot service running the redeploy script |
 | `ispconfig-integration/watchdog/shell-timer-watchdog.timer` | systemd hourly safety-net timer |
+| `ispconfig-integration/lib-apache.sh` | Shared vhost, sudoers and verification helpers used by the installer and the watchdog |
 | `ispconfig-integration/README-watchdog.md` | Watchdog architecture & manual test instructions |
+
+### Which vhost gets the injection
+
+Apache only reads `sites-enabled`. On a stock install `sites-enabled/000-ispconfig.vhost` is a
+symlink into `sites-available`, but it can equally be a **real file**, and then
+`sites-available/ispconfig.vhost` is a dead copy Apache never parses.
+
+Picking "the first candidate that exists" writes the injection into that dead file, and a marker
+check against the same file then reports success while nothing reaches the browser. The installer
+and the watchdog resolve every candidate with `readlink -f`, de-duplicate, and inject into each
+distinct real file, always through the resolved path: `sed -i` on a symlink replaces it with a
+regular file and quietly forks the config.
+
+Because file contents prove nothing here, install and `status` finish by fetching the panel's own
+login page and counting `timer.js` references. Exactly one is correct. Zero means the injection
+never reaches the browser, two means two mechanisms are active and the script would run twice.
+
+The cache-buster is the md5 of the deployed `timer.js` rather than a fixed `?v=2`, so a redeploy
+invalidates the browser cache, and the watchdog rewrites the block when that hash changes.
 
 Files created on the server by the integration installer:
 
