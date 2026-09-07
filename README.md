@@ -192,7 +192,15 @@ A `<button>` without an explicit type is a submit button, so clicking one submit
 
 1. **Apache `mod_substitute`** – Injects a `<script>` tag into ISPConfig HTML responses via the vhost config (ISPConfig updates don't touch the vhost)
 2. **Custom directory** – Plugin files live in `/usr/local/ispconfig/interface/web/shell_timer/`
-3. **Sudoers** – Allows the web process to call enable/disable scripts via `sudo`
+3. **Sudoers** – Allows the panel process to call enable/disable scripts via `sudo`.
+   The grant goes to the user the panel's PHP **actually** runs as, which with the default
+   mod_fcgid + suexec setup is the vhost's `SuexecUserGroup`, normally `ispconfig`, **not**
+   `www-data`. The installer reads that from the vhost (falling back to the owner of
+   `/var/www/php-fcgi-scripts/ispconfig/.php-fcgi-starter`), writes rules for it and for
+   `www-data`, and then proves the grant works with
+   `runuser -u <user> -- sudo -n -l …` before declaring success. A sudoers file written for the
+   wrong user leaves every panel action failing with `sudo: a password is required`, and the file
+   existing tells you nothing, which is why the check is a live probe.
 
 #### Update-safe watchdog
 
@@ -280,7 +288,8 @@ and the installer sweeps away any stray copy an earlier version left behind.
 * Disable gracefully terminates active sessions (HUP → TERM → KILL)
 * Disable does not alter the user's chroot setting (preserves the original None / Jailkit configuration)
 * ISPConfig integration: admin-only for enable/disable actions
-* ISPConfig integration: sudoers with NOPASSWD only for specific scripts
+* ISPConfig integration: sudoers with NOPASSWD only for the three specific scripts, granted to the
+  panel's real runtime user (`ispconfig` under suexec) and `www-data`, never to a wildcard
 * Lock file prevents concurrent monitor execution
 * Logrotate configured (weekly, 12 weeks retention)
 

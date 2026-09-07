@@ -105,14 +105,15 @@ if ($action === 'list') {
     $hours = isset($_GET['hours']) ? max(1, min(24, (int)$_GET['hours'])) : 3;
     $output = [];
     $retval = 0;
-    exec("sudo /usr/local/shell-access-manager/enable-shell-user.sh " .
+    // -n: never try to read a password from a terminal there is none of.
+    exec("sudo -n /usr/local/shell-access-manager/enable-shell-user.sh " .
          escapeshellarg($username) . " " . (int)$hours . " 2>&1", $output, $retval);
     echo json_encode(script_result($username, $output, $retval, $hours));
 
 } elseif ($action === 'disable' && $username) {
     $output = [];
     $retval = 0;
-    exec("sudo /usr/local/shell-access-manager/disable-shell-user.sh " .
+    exec("sudo -n /usr/local/shell-access-manager/disable-shell-user.sh " .
          escapeshellarg($username) . " manual-ispconfig 2>&1", $output, $retval);
     echo json_encode(script_result($username, $output, $retval, null));
 
@@ -136,7 +137,14 @@ function script_result($username, $output, $retval, $hours) {
         'output'   => $text
     ];
     if ($hours !== null) $res['hours'] = (int)$hours;
-    if ($retval !== 0 && $text === '') {
+    if ($retval !== 0 && preg_match('/(password is required|askpass|a terminal is required|not allowed to execute)/i', $text)) {
+        // The panel runs as the vhost's SuexecUserGroup (normally ispconfig),
+        // not as www-data, so a sudoers file written for the wrong user leaves
+        // every action failing here.
+        $res['error'] = 'A panel felhasznaloja nem futtathatja jelszo nelkul a shell-access-manager '
+                      . 'szkripteket. Futtasd ujra a telepitot: '
+                      . 'sudo bash ispconfig-integration/install.sh install';
+    } elseif ($retval !== 0 && $text === '') {
         $res['error'] = 'A szkript hibakoddal lepett ki (exit ' . (int)$retval . '), kimenet nelkul. '
                       . 'Ellenorizd: /var/log/shell-access-manager.log';
     }

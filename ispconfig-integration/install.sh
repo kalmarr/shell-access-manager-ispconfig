@@ -50,6 +50,44 @@ sweep_stray_backups() {
     return 0
 }
 
+# Which user does the ISPConfig panel's PHP actually run as? With mod_fcgid +
+# suexec (the ISPConfig default) it is NOT www-data but the vhost's
+# SuexecUserGroup, normally "ispconfig". Granting sudo to the wrong user leaves
+# every enable/disable failing with "sudo: a password is required".
+detect_panel_user() {
+    local vhost user=""
+    for vhost in /etc/apache2/sites-enabled/000-ispconfig.vhost \
+                 /etc/apache2/sites-available/ispconfig.vhost \
+                 /etc/apache2/sites-available/ispconfig.conf; do
+        [ -f "$vhost" ] || continue
+        user=$(grep -oP '^[[:space:]]*SuexecUserGroup[[:space:]]+\K[^[:space:]]+' "$vhost" 2>/dev/null | head -1 || true)
+        [ -n "$user" ] && break
+        user=$(grep -oP '^[[:space:]]*AssignUserId[[:space:]]+\K[^[:space:]]+' "$vhost" 2>/dev/null | head -1 || true)
+        [ -n "$user" ] && break
+    done
+
+    # Fall back to the owner of the panel's fcgi starter: suexec runs the CGI as
+    # that user, so it is authoritative when the vhost cannot be read.
+    if [ -z "$user" ] && [ -f /var/www/php-fcgi-scripts/ispconfig/.php-fcgi-starter ]; then
+        user=$(stat -c %U /var/www/php-fcgi-scripts/ispconfig/.php-fcgi-starter 2>/dev/null || true)
+    fi
+
+    [ -n "$user" ] || user="ispconfig"
+    id -u "$user" >/dev/null 2>&1 || user="www-data"
+    echo "$user"
+}
+
+# Prove the grant works instead of trusting that the sudoers file exists.
+check_sudo_for() {
+    local user="$1" script="${SHELL_MANAGER_DIR}/enable-shell-user.sh"
+    id -u "$user" >/dev/null 2>&1 || return 1
+    if command -v runuser >/dev/null 2>&1; then
+        runuser -u "$user" -- sudo -n -l "$script" >/dev/null 2>&1
+    else
+        su -s /bin/sh -c "sudo -n -l $(printf '%q' "$script")" "$user" >/dev/null 2>&1
+    fi
+}
+
 # shell-access-manager.conf is 0600 root, so the panel process cannot read the
 # limits and would silently show the built-in defaults. Publish just those two
 # numbers world-readable next to the state files.
@@ -179,13 +217,25 @@ APACHECONF
     # --- 3. Sudoers ---
     echo ""
     echo "3. Jogosultságok beállítása..."
-    cat > "$SUDOERS_FILE" << 'SUDOERS'
-# Shell Timer - ISPConfig Integration
-# Allow ISPConfig web process to manage shell access
-www-data ALL=(root) NOPASSWD: /usr/local/shell-access-manager/enable-shell-user.sh
-www-data ALL=(root) NOPASSWD: /usr/local/shell-access-manager/disable-shell-user.sh
-www-data ALL=(root) NOPASSWD: /usr/local/shell-access-manager/status.sh
-SUDOERS
+    local panel_user done_users=""
+    panel_user=$(detect_panel_user)
+    log_info "A panel PHP-ja ezen a néven fut: $panel_user"
+
+    rm -f "$SUDOERS_FILE"
+    {
+        echo "# Shell Timer - ISPConfig Integration"
+        echo "# Allow the ISPConfig panel process to manage shell access."
+        echo "# With mod_fcgid + suexec the panel runs as the vhost's SuexecUserGroup"
+        echo "# (normally ispconfig), not as www-data, so both are listed."
+        for u in "$panel_user" www-data; do
+            id -u "$u" >/dev/null 2>&1 || continue
+            case " $done_users " in *" $u "*) continue ;; esac
+            done_users="$done_users $u"
+            echo "$u ALL=(root) NOPASSWD: ${SHELL_MANAGER_DIR}/enable-shell-user.sh"
+            echo "$u ALL=(root) NOPASSWD: ${SHELL_MANAGER_DIR}/disable-shell-user.sh"
+            echo "$u ALL=(root) NOPASSWD: ${SHELL_MANAGER_DIR}/status.sh"
+        done
+    } > "$SUDOERS_FILE"
     chmod 440 "$SUDOERS_FILE"
     
     if visudo -c -f "$SUDOERS_FILE" &>/dev/null; then
@@ -193,6 +243,17 @@ SUDOERS
     else
         log_err "Sudoers szintaxis hiba!"
         rm -f "$SUDOERS_FILE"
+        exit 1
+    fi
+
+    # An existing sudoers file proves nothing: the previous version granted
+    # www-data while the panel actually runs as ispconfig, so every action
+    # failed with "sudo: a password is required". Verify for real.
+    if check_sudo_for "$panel_user"; then
+        log_ok "sudo próba sikeres: $panel_user jelszó nélkül futtathatja a szkripteket"
+    else
+        log_err "sudo próba SIKERTELEN: $panel_user nem tudja jelszó nélkül futtatni a szkripteket!"
+        log_err "A panelről az indítás és a letiltás így nem működne."
         exit 1
     fi
 
@@ -322,6 +383,15 @@ do_status() {
         [ -f "$f" ] && log_ok "$f" || log_err "$f"
     done
     [ -f "$SUDOERS_FILE" ] && log_ok "$SUDOERS_FILE" || log_err "$SUDOERS_FILE"
+    local panel_user
+    panel_user=$(detect_panel_user)
+    log_info "Panel felhasználó: $panel_user"
+    if check_sudo_for "$panel_user"; then
+        log_ok "sudo jogosultság él: $panel_user (jelszó nélkül)"
+    else
+        log_err "sudo jogosultság HIÁNYZIK: $panel_user - a panelről nem indítható a shell"
+        log_info "Javítás: sudo bash $0 install"
+    fi
 
     echo ""
     echo "  Apache:"
