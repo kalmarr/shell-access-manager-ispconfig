@@ -152,17 +152,55 @@ A web-based UI that adds countdown timers, status indicators, and enable/disable
 ### What It Adds
 
 * **SSH-User list page** – 3 new columns: Status (ACTIVE/IDLE/DISABLED), Time Remaining, Access Level
-* **SSH-User edit page** – Timer panel with live countdown, process list, and enable/disable buttons
+* **SSH-User edit page** – Timer panel with live countdown, process list, and start/restart/disable buttons
 * **Shell Timer Dashboard** – Dedicated page accessible from the Sites menu showing all users with real-time status
+* **Bulk actions** – Tick several users on the dashboard and start, restart or disable them in one go
 * **Auto-refresh** – Dashboard refreshes every 30 seconds, edit page countdown updates every second
+* **Stays on the page** – Every action re-renders in place instead of navigating back to the start page
+
+### Bulk Actions on the Dashboard
+
+Each dashboard row has a checkbox (admin only) and each table has a select-all box in its header.
+As soon as something is ticked, a sticky action bar appears:
+
+| Button | Effect |
+| --- | --- |
+| **Indítás 3ó** | Starts every selected user with a 3 hour window |
+| **8ó újraindítás** | Restarts the window at 8 hours for every selected user |
+| **Letiltás** | Disables every selected user |
+| **Kijelölés törlése** | Clears the selection |
+
+One confirmation dialog lists the affected users, then they are processed one after another with a
+per-row progress indicator, followed by a summary banner listing any failures. The selection survives
+the 30 second auto-refresh, and the refresh pauses while a bulk run is in progress.
+
+**The 8 hour action is a restart, not an extension.** `enable-shell-user.sh` rewrites the state files
+and reschedules the `at` job, so both the idle and the hard timer count from the moment the button is
+pressed. It never adds time to the current expiry.
+
+#### Why the buttons need `type="button"`
+
+ISPConfig loads every page into `#pageContent`, which sits **inside** its `<form id="pageForm">`.
+A `<button>` without an explicit type is a submit button, so clicking one submits that form, reloads
+`index.php` and drops the operator on the start page. All panel buttons therefore carry
+`type="button"`, use delegated click handlers rather than inline `onclick`, and no code path calls
+`location.reload()`.
 
 ### How It Works (Update-Safe via Watchdog)
 
 **Zero ISPConfig files are modified.** The integration uses:
 
-1. **Apache `mod_substitute`** – Injects a `<script>` tag into ISPConfig HTML responses via the vhost config (ISPConfig updates don't touch the vhost)
+1. **Apache `mod_substitute`** – Injects a `<script>` tag into ISPConfig HTML responses via the vhost config (ISPConfig updates don't touch the vhost). See **Which vhost gets the injection** below: the target is resolved with `readlink -f`, because Apache only reads `sites-enabled`
 2. **Custom directory** – Plugin files live in `/usr/local/ispconfig/interface/web/shell_timer/`
-3. **Sudoers** – Allows the web process to call enable/disable scripts via `sudo`
+3. **Sudoers** – Allows the panel process to call enable/disable scripts via `sudo`.
+   The grant goes to the user the panel's PHP **actually** runs as, which with the default
+   mod_fcgid + suexec setup is the vhost's `SuexecUserGroup`, normally `ispconfig`, **not**
+   `www-data`. The installer reads that from the vhost (falling back to the owner of
+   `/var/www/php-fcgi-scripts/ispconfig/.php-fcgi-starter`), writes rules for it and for
+   `www-data`, and then proves the grant works with
+   `runuser -u <user> -- sudo -n -l …` before declaring success. A sudoers file written for the
+   wrong user leaves every panel action failing with `sudo: a password is required`, and the file
+   existing tells you nothing, which is why the check is a live probe.
 
 #### Update-safe watchdog
 
@@ -220,12 +258,73 @@ This only removes the panel integration; the base shell access manager remains i
 | `ispconfig-integration/install.sh` | ISPConfig integration installer |
 | `ispconfig-integration/shell_timer/api.php` | AJAX API endpoint |
 | `ispconfig-integration/shell_timer/timer.js` | Frontend JS (list/edit page enhancement) |
-| `ispconfig-integration/shell_timer/dashboard.php` | Dashboard page |
+| `ispconfig-integration/shell_timer/dashboard.php` | Dashboard page with multi-select bulk actions |
 | `ispconfig-integration/watchdog/ispconfig-redeploy.sh` | Idempotent restore script (deployed to `/usr/local/shell-access-manager/`) |
 | `ispconfig-integration/watchdog/shell-timer-watchdog.path` | systemd path-unit reacting to ISPConfig updates |
 | `ispconfig-integration/watchdog/shell-timer-watchdog.service` | systemd oneshot service running the redeploy script |
 | `ispconfig-integration/watchdog/shell-timer-watchdog.timer` | systemd hourly safety-net timer |
+| `ispconfig-integration/lib-apache.sh` | Shared vhost, sudoers and verification helpers used by the installer and the watchdog |
 | `ispconfig-integration/README-watchdog.md` | Watchdog architecture & manual test instructions |
+
+### Which vhost gets the injection
+
+Apache only reads `sites-enabled`. On a stock install `sites-enabled/000-ispconfig.vhost` is a
+symlink into `sites-available`, but it can equally be a **real file**, and then
+`sites-available/ispconfig.vhost` is a dead copy Apache never parses.
+
+Picking "the first candidate that exists" writes the injection into that dead file, and a marker
+check against the same file then reports success while nothing reaches the browser. The installer
+and the watchdog resolve every candidate with `readlink -f`, de-duplicate, and inject into each
+distinct real file, always through the resolved path: `sed -i` on a symlink replaces it with a
+regular file and quietly forks the config.
+
+**A candidate must also actually be the panel's vhost.** The filename is not enough. On some hosts
+`sites-available/ispconfig.conf` is ISPConfig's *global* Apache config, generated from
+`apache_ispconfig.conf.master`: `ServerTokens`, `DirectoryIndex`, vlogger settings and a few
+`NameVirtualHost` lines, with no `<VirtualHost>` block and no reference to the panel docroot. It is
+enabled through `sites-enabled/000-ispconfig.conf`, so it looks live, and it sits right next to the
+real `ispconfig.vhost`. The name is inherited from older distributions where the panel vhost really
+was called `ispconfig.conf`. A candidate therefore has to contain `</VirtualHost>` **and** reference
+`/usr/local/ispconfig/interface/web` or `/var/www/ispconfig`; anything else is skipped.
+
+Because file contents prove nothing here, install and `status` finish by fetching the panel's own
+login page and counting `timer.js` references. Exactly one is correct. Zero means the injection
+never reaches the browser, two means two mechanisms are active and the script would run twice.
+
+The cache-buster is the md5 of the deployed `timer.js` rather than a fixed `?v=2`, so a redeploy
+invalidates the browser cache, and the watchdog rewrites the block when that hash changes.
+
+Files created on the server by the integration installer:
+
+| Path | Description |
+| --- | --- |
+| `/var/lib/shell-access-manager/panel-limits.conf` | World-readable copy of `IDLE_LIMIT` / `HARD_LIMIT` for the panel |
+| `/var/backups/shell-timer/` | Backups of vhosts edited by the installer |
+
+**Why the limits are copied:** `shell-access-manager.conf` is mode 0600 root, so the panel process
+cannot read it and would silently display the built-in defaults (3h idle, 8h hard) instead of the
+configured values.
+
+**Why backups moved out of the vhost directory:** Apache parses every file in `sites-enabled`, so a
+`.bak` copy left beside the vhost is read as a second vhost and takes the whole config down with
+`Cannot define multiple Listeners on the same IP:port`. Backups now go to `/var/backups/shell-timer/`
+and the installer sweeps away any stray copy an earlier version left behind.
+
+## Troubleshooting
+
+`sudo bash ispconfig-integration/install.sh status` answers most of these; it ends with a live
+request against the panel and reports how many times the page references `timer.js`.
+
+| Symptom | Cause | Check | Fix |
+| --- | --- | --- | --- |
+| No **Shell Timer** item in the Sites menu, no timer panel, after a full page reload | Nothing injects the script tag, so `timer.js` never loads and cannot add the nav item | `curl -sk https://127.0.0.1:8080/login/ \| grep -c shell_timer/timer.js` returns 0 | Re-run the installer; it injects into every real panel vhost and verifies the result |
+| The panel jumps back to the start page after clicking a timer button | An old `timer.js` / `dashboard.php` is deployed, whose buttons have no `type="button"` and so submit ISPConfig's `pageForm` | `grep -c 'type="button"' /usr/local/ispconfig/interface/web/shell_timer/dashboard.php` returns 0 | Re-run the installer, then hard-reload the browser. The `?v=` cache-buster changes with the file |
+| Every enable/disable fails with `sudo: a password is required` | The sudoers grant names the wrong user: with mod_fcgid + suexec the panel runs as `ispconfig`, not `www-data` | `runuser -u ispconfig -- sudo -n -l /usr/local/shell-access-manager/enable-shell-user.sh` | Re-run the installer; it detects the panel user and proves the grant before finishing |
+| The dashboard shows a user as **LEJÁRT / expired** that the monitor still keeps enabled | Idle was counted from the enable time instead of the monitor's sliding `last_seen_active` window | Compare `<user>.enabled` and `<user>.last_seen_active` in `/var/lib/shell-access-manager/` | Deploy the current `api.php`; it takes the later of the two, like `monitor-idle-users.sh` |
+| The displayed idle/hard limits do not match the configuration | `shell-access-manager.conf` is 0600 root, unreadable for the panel, which then shows its built-in defaults | `cat /var/lib/shell-access-manager/panel-limits.conf` | Re-run the installer; it publishes the two limits in that readable file |
+| Apache refuses to start: `Cannot define multiple Listeners on the same IP:port` | A `.bak` copy of the vhost was left inside `sites-enabled`, which Apache parses as a second vhost | `ls /etc/apache2/sites-enabled/*.bak*` | Move it out; the installer sweeps strays into `/var/backups/shell-timer/` and never backs up in place |
+| Fixes come back undone about an hour later | The watchdog restores the panel files from `ispconfig-templates/`, and that store was older than the deploy | Compare the template files with the deployed ones; `status` flags a mismatch | Re-run `ispconfig-integration/install.sh`, which now owns the template store |
+| The script tag appears **twice** | Two mechanisms are active at once, typically a leftover `conf-enabled/shell-timer.conf` next to the vhost injection | The live check reports a count of 2 | Re-run the installer; it removes the older conf-available/cron variant |
 
 ## Security Notes
 
@@ -234,7 +333,8 @@ This only removes the panel integration; the base shell access manager remains i
 * Disable gracefully terminates active sessions (HUP → TERM → KILL)
 * Disable does not alter the user's chroot setting (preserves the original None / Jailkit configuration)
 * ISPConfig integration: admin-only for enable/disable actions
-* ISPConfig integration: sudoers with NOPASSWD only for specific scripts
+* ISPConfig integration: sudoers with NOPASSWD only for the three specific scripts, granted to the
+  panel's real runtime user (`ispconfig` under suexec) and `www-data`, never to a wildcard
 * Lock file prevents concurrent monitor execution
 * Logrotate configured (weekly, 12 weeks retention)
 

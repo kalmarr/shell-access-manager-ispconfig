@@ -48,6 +48,13 @@
         return d.innerHTML;
     }
 
+    // esc() leaves quotes alone, so HTML attribute values need their own escaper.
+    function escAttr(str) {
+        return String(str === null || str === undefined ? '' : str)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
     async function apiCall(action, params) {
         const qs = new URLSearchParams(params || {});
         qs.set('action', action);
@@ -236,13 +243,18 @@
         }
 
         // Buttons
+        // type="button" is mandatory: this panel is injected INSIDE ISPConfig's
+        // <form id="pageForm">, and a bare <button> submits that form, which
+        // reloads index.php and throws the operator back to the start page.
+        const uattr = escAttr(username);
         let btns = '';
         if (t.state === 'disabled') {
-            btns = '<button class="btn btn-success btn-sm" onclick="ShellTimer.enable(\'' + esc(username) + '\',3)">▶ Engedélyez (3ó)</button> ' +
-                   '<button class="btn btn-success btn-sm" onclick="ShellTimer.enable(\'' + esc(username) + '\',8)">▶ Engedélyez (8ó)</button>';
+            btns = '<button type="button" class="btn btn-success btn-sm" data-st-action="enable" data-st-user="' + uattr + '" data-st-hours="3">▶ Engedélyez (3ó)</button> ' +
+                   '<button type="button" class="btn btn-success btn-sm" data-st-action="enable" data-st-user="' + uattr + '" data-st-hours="8">▶ Engedélyez (8ó)</button>';
         } else {
-            btns = '<button class="btn btn-warning btn-sm" onclick="ShellTimer.enable(\'' + esc(username) + '\',3)">↻ Újraindít (3ó)</button> ' +
-                   '<button class="btn btn-danger btn-sm" onclick="ShellTimer.disable(\'' + esc(username) + '\')">■ Letilt</button>';
+            btns = '<button type="button" class="btn btn-warning btn-sm" data-st-action="enable" data-st-user="' + uattr + '" data-st-hours="3">↻ Újraindít (3ó)</button> ' +
+                   '<button type="button" class="btn btn-primary btn-sm" data-st-action="enable" data-st-user="' + uattr + '" data-st-hours="8" title="A timer újraindítása 8 órára, a mostani időponttól">⏱ Újraindítás 8ó-ra</button> ' +
+                   '<button type="button" class="btn btn-danger btn-sm" data-st-action="disable" data-st-user="' + uattr + '">■ Letilt</button>';
         }
 
         // Build panel
@@ -265,6 +277,10 @@
                     '<div class="col-sm-3">' +
                         '<div style="font-size:11px;color:#999">Engedélyezve</div>' +
                         '<div><strong>' + (t.enabled ? fmtDate(t.enabled_at) : '-') + '</strong></div>' +
+                        (t.last_seen_active && t.last_seen_active > t.enabled_at
+                            ? '<div style="font-size:11px;color:#999;margin-top:4px">Utoljára aktív</div>' +
+                              '<div><strong>' + fmtDate(t.last_seen_active) + '</strong></div>'
+                            : '') +
                         '<div style="font-size:11px;color:#999;margin-top:6px">Processek</div>' +
                         '<div><strong>' + t.process_count + ' db</strong></div>' +
                     '</div>' +
@@ -288,6 +304,16 @@
 
         const form = document.querySelector('form[name="pageForm"]') || document.querySelector('.form-horizontal');
         if (form) form.parentNode.insertBefore(panel, form);
+
+        panel.addEventListener('click', function(e) {
+            const btn = e.target.closest('button[data-st-action]');
+            if (!btn) return;
+            e.preventDefault();
+            e.stopPropagation();
+            const hours = parseInt(btn.dataset.stHours || '3', 10);
+            if (btn.dataset.stAction === 'enable') window.ShellTimer.enable(btn.dataset.stUser, hours);
+            else if (btn.dataset.stAction === 'disable') window.ShellTimer.disable(btn.dataset.stUser);
+        });
 
         if (t.state !== 'disabled') startCountdown(t);
     }
@@ -326,23 +352,34 @@
     // Public API (for buttons)
     // ========================================
 
+    // Re-render the panel in place. NEVER call location.reload(): the ISPConfig
+    // panel is one AJAX page, so a reload drops the operator on the start page.
+    function refreshPanel() {
+        if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
+        const existing = document.getElementById('shell-timer-panel');
+        if (existing) existing.remove();
+        return enhanceEditPage();
+    }
+
     window.ShellTimer = {
         enable: async function(username, hours) {
-            if (!confirm('Engedélyezed: ' + username + ' (' + hours + 'ó)?')) return;
+            if (!confirm('Engedélyezed: ' + username + ' (' + hours + 'ó)?\n\n' +
+                         'A timer nem hozzáad, hanem ÚJRAINDUL: az idle és a hard\n' +
+                         'limit is a mostani időponttól számít.')) return;
             const d = await apiCall('enable', { username: username, hours: hours });
             if (d && d.status === 'ok') {
-                location.reload ? location.reload() : enhanceEditPage();
+                refreshPanel();
             } else {
-                alert('Hiba: ' + (d ? d.output || d.error : 'API hiba'));
+                alert('Hiba: ' + (d ? (d.output || d.error) : 'API hiba'));
             }
         },
         disable: async function(username) {
             if (!confirm('Letiltod: ' + username + '?')) return;
             const d = await apiCall('disable', { username: username });
             if (d && d.status === 'ok') {
-                location.reload ? location.reload() : enhanceEditPage();
+                refreshPanel();
             } else {
-                alert('Hiba: ' + (d ? d.output || d.error : 'API hiba'));
+                alert('Hiba: ' + (d ? (d.output || d.error) : 'API hiba'));
             }
         }
     };
