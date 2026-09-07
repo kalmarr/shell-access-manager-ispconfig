@@ -30,7 +30,21 @@ ST_MANAGER_DIR="${ST_MANAGER_DIR:-/usr/local/shell-access-manager}"
 # Resolve every candidate with readlink -f, drop duplicates, and return the real
 # files. Editing must always happen on the resolved path: sed -i replaces a
 # symlink with a regular file, quietly forking the config.
+#
+# A candidate only counts if it really is the panel's vhost. The name is not
+# enough: on some hosts sites-available/ispconfig.conf is ISPConfig's GLOBAL
+# Apache config (ServerTokens, vlogger, NameVirtualHost lines) with no
+# <VirtualHost> block at all, sitting next to the real ispconfig.vhost. Trying
+# to inject into it fails, and parsing it for the port or the panel user finds
+# nothing. So: must contain </VirtualHost> AND reference the panel docroot.
 # ------------------------------------------------------------
+st_is_panel_vhost() {
+    local f="$1"
+    [ -f "$f" ] || return 1
+    grep -qi '</VirtualHost>' "$f" 2>/dev/null || return 1
+    grep -q '/usr/local/ispconfig/interface/web\|/var/www/ispconfig' "$f" 2>/dev/null
+}
+
 st_vhost_candidates() {
     local v real seen=""
     for v in /etc/apache2/sites-enabled/000-ispconfig.vhost \
@@ -39,6 +53,7 @@ st_vhost_candidates() {
         [ -e "$v" ] || continue
         real=$(readlink -f "$v" 2>/dev/null || true)
         [ -n "$real" ] && [ -f "$real" ] || continue
+        st_is_panel_vhost "$real" || continue
         case " $seen " in *" $real "*) continue ;; esac
         seen="$seen $real"
         printf '%s\n' "$real"
@@ -160,6 +175,7 @@ st_sync_vhosts() {
     local hash="$1" vhost cur rc=0
     while IFS= read -r vhost; do
         [ -n "$vhost" ] || continue
+        st_is_panel_vhost "$vhost" || continue
         cur=$(st_block_hash "$vhost")
         if st_has_block "$vhost" && [ "$cur" = "$hash" ]; then
             continue
@@ -207,7 +223,10 @@ st_injection_count() {
         plain=$(curl -s --max-time 8 "http://127.0.0.1:${port}/login/" 2>/dev/null || true)
         printf '%s' "$plain" | grep -q "shell_timer/timer.js" && body="$plain"
     fi
-    printf '%s' "$body" | grep -o "shell_timer/timer.js" | wc -l
+    # grep -o exits 1 on zero matches; with pipefail that would make this
+    # function fail and, under set -e, kill the caller at the assignment instead
+    # of letting it report "0 injections". Swallow grep's status, count with wc.
+    { printf '%s' "$body" | grep -o "shell_timer/timer.js" || true; } | wc -l
 }
 
 # ------------------------------------------------------------
